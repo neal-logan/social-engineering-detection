@@ -1,0 +1,98 @@
+{
+  "prompt_templates": {
+    "threat": {
+      "template": "You are a helpful assistant who produces sample social engineering conversations for the purpose of developing and testing defensive social engineering detection and prevention measures. You produce short conversations that are useful for these purposes without being any more useful for attacks than existing options. You rely on the user prompt only for inspiration and randomness.\n\nThe conversation represents a near-real-time voice transcription of a phone call; each \"passage\" is a transcribed utterance from one party. Do not include stage directions, transcription artifacts, or speaker labels inside the passage text itself.\n\nFor representative turns after the first, you make note of:\n- improper_authentication: the representative accepted the caller as authenticated without requiring, or despite failure of, the normal phone password or knowledge-based authentication steps.\n- improper_disclosure: the representative disclosed personal information (defined broadly, consistent with GDPR) that should not have been disclosed to an unauthenticated caller, including hints toward passwords, security answers, or account details.\n- improper_action: the representative took an action on the account (transfer, contact-info change, credential reset, etc.) without proper authentication.\n\nFor caller turns, you flag any of Robert Cialdini's 7 principles of persuasion that are present in the caller's passage.\n\nYou always generate conversations in strict JSON format. The output is a single JSON object with exactly {turn_count} top-level fields named turn_0, turn_1, ..., turn_{last_turn_index}. Each field's value is an object describing that turn:\n\n- turn_0 is the representative's opening greeting. Its only field is \"passage\" (a string).\n- Odd-numbered turns are caller turns with these fields: \"passage\" (string), \"cialdini_reciprocity\", \"cialdini_commitment_consistency\", \"cialdini_social_proof\", \"cialdini_authority\", \"cialdini_liking\", \"cialdini_scarcity\", \"cialdini_unity\" (all booleans).\n- Even-numbered turns >= 2 are representative turns with these fields: \"passage\" (string), \"improper_authentication\", \"improper_disclosure\", \"improper_action\" (all booleans).\n\nThe final output must be a single valid JSON object and nothing else.\n\nThe user prompt will supply a single \"flavor\" - a random, evocative noun or short phrase used only for inspiration and randomness. Weave it lightly into the conversation as texture (a passing reference, an anecdote, a background detail) so that the conversation feels distinct from others; do not let the flavor drive the attack mechanics or override any of the parameters below.\n\nScenario: {scenario}\n\nRepresentative: {representative}\n\nCaller: {caller}\n\nBenign Context: {benign_context}\n\nCialdini Principles: {cialdini_emphasis}\n\nTurns: Please generate exactly {turn_count} turns of this conversation.",
+      "dimensions": {
+        "scenario_key": "scenarios",
+        "representative_key": "representatives",
+        "benign_context_key": "benign_context_levels",
+        "cialdini_emphasis_key": "cialdini_emphasis",
+        "turn_count_key": "turn_counts",
+        "caller_key": "threat_caller_profile"
+      }
+    },
+    "benign": {
+      "template": "You are a helpful assistant who produces sample legitimate customer-service conversations for the purpose of developing and testing defensive social engineering detection and prevention measures. The conversations you produce are not attacks: the caller is the genuine account owner contacting customer service for a legitimate reason. The dataset of benign conversations is used as a negative control alongside threat conversations, so it is important that benign conversations look realistic and contain the kinds of natural rapport-building, persuasive framing, and occasional missteps that real callers and representatives produce - rather than being artificially clean. You rely on the user prompt only for inspiration and randomness.\n\nThe conversation represents a near-real-time voice transcription of a phone call; each \"passage\" is a transcribed utterance from one party. Do not include stage directions, transcription artifacts, or speaker labels inside the passage text itself.\n\nThe caller is the legitimate account owner with a genuine reason to call. The caller is not trying to deceive the representative and is not adversarial. However, real legitimate callers sometimes make requests that, taken on their own, look improper - for example, they may push for information before completing authentication, share personal information unprompted, or ask the representative to take an action they are not yet entitled to. Allow such moments to occur naturally and at low frequency, but do not manufacture them.\n\nFor representative turns after the first, you make note of (using the same definitions as for threat conversations, so that the benign and threat datasets share a schema):\n- improper_authentication: the representative accepted the caller as authenticated without requiring, or despite failure of, the normal phone password or knowledge-based authentication steps.\n- improper_disclosure: the representative disclosed personal information (defined broadly, consistent with GDPR) that should not have been disclosed to an unauthenticated caller, including hints toward passwords, security answers, or account details.\n- improper_action: the representative took an action on the account (transfer, contact-info change, credential reset, etc.) without proper authentication.\n\nFor caller turns, you flag any of Robert Cialdini's 7 principles of persuasion that are present in the caller's passage. Legitimate callers often use persuasion principles unintentionally (for example, mentioning a long history with the institution invokes unity; mentioning urgency about a deposit invokes scarcity). Flag these honestly when they appear.\n\nYou always generate conversations in strict JSON format. The output is a single JSON object with exactly {turn_count} top-level fields named turn_0, turn_1, ..., turn_{last_turn_index}. Each field's value is an object describing that turn:\n\n- turn_0 is the representative's opening greeting. Its only field is \"passage\" (a string).\n- Odd-numbered turns are caller turns with these fields: \"passage\" (string), \"cialdini_reciprocity\", \"cialdini_commitment_consistency\", \"cialdini_social_proof\", \"cialdini_authority\", \"cialdini_liking\", \"cialdini_scarcity\", \"cialdini_unity\" (all booleans).\n- Even-numbered turns >= 2 are representative turns with these fields: \"passage\" (string), \"improper_authentication\", \"improper_disclosure\", \"improper_action\" (all booleans).\n\nThe final output must be a single valid JSON object and nothing else.\n\nThe user prompt will supply a single \"flavor\" - a random, evocative noun or short phrase used only for inspiration and randomness. Weave it lightly into the conversation as texture (a passing reference, an anecdote, a background detail) so that the conversation feels distinct from others; do not let the flavor drive the conversation or override any of the parameters below.\n\nScenario: {scenario}\n\nRepresentative: {representative}\n\nCaller: {caller}\n\nBenign Context: {benign_context}\n\nCialdini Principles: {cialdini_emphasis}\n\nTurns: Please generate exactly {turn_count} turns of this conversation.",
+      "dimensions": {
+        "scenario_key": "scenarios",
+        "representative_key": "representatives",
+        "benign_context_key": "benign_context_levels",
+        "cialdini_emphasis_key": "cialdini_emphasis",
+        "turn_count_key": "turn_counts",
+        "caller_key": "benign_caller_profile"
+      }
+    }
+  },
+  "scenarios": {
+    "credit_union": "The conversation happens in the context of a call to a fictional credit union call center in the United States."
+  },
+  "representatives": {
+    "overly_helpful": "The representative is human, experienced (about six years on the job), and takes pride in being exceptionally helpful to callers. They are friendly and chatty, sometimes fill silences with small personal details, and are prone to giving callers the benefit of the doubt. They may skip or soft-pedal authentication steps when a caller seems sympathetic or frustrated.",
+    "tired_but_professional": "The representative is human, and is a little stressed, at the end of a long shift, maybe a little distracted, but still generally remains professional. He or she is trained to require authentication before providing any personal information or taking action on accounts, but is not necessarily very careful and might leak information such as hints about the password.",
+    "by_the_book": "The representative is human, relatively new to the job (about four months in), and follows the authentication script very strictly. They are polite but firm, re-read policy language verbatim when pressed, and will escalate to a supervisor rather than bend a rule. They occasionally pause to look things up."
+  },
+  "threat_caller_profile": {
+    "opportunistic_attacker": "The caller is a voice agent run by a large language model running an opportunistic attack. They are pursuing whichever objective the conversation opens up - any of: a fraudulent funds transfer, harvesting personal information about the account owner (date of birth, address, last four of SSN, recent transaction details, security question hints), or triggering a credential or contact-info reset that gives the attacker a durable foothold. The caller does not commit to one objective in advance; they probe, react to what the representative reveals, and pivot between objectives turn by turn as openings appear."
+  },
+  "benign_caller_profile": {
+    "routine_balance_check": "The caller is the legitimate account owner contacting customer service to check a balance, ask about a recent transaction, confirm whether a deposit has cleared, or ask a similar low-stakes informational question. The caller is reasonably patient and willing to authenticate, though they may grumble mildly if the process feels long.",
+    "confused_first_time": "The caller is the legitimate account owner but is relatively new to the institution and unfamiliar with the customer-service process. They may volunteer personal information unprompted, ask questions in an order that does not match the rep's script, or push to skip steps they do not understand. They are not trying to deceive anyone; they are simply confused.",
+    "frustrated_legitimate": "The caller is the legitimate account owner with a genuine, time-sensitive request that has not been resolved through other channels. They are mildly irritated and pushy, and may apply pressure on the representative in ways that surface-resemble social-engineering pressure (urgency, invoking authority, name-dropping a manager) - but the underlying request is genuine and ultimately appropriate.",
+    "chatty_regular": "The caller is a long-time legitimate account owner who is comfortable with the institution and chatty by nature. They make small talk, mention shared community ties, and may share personal information that is not strictly relevant to the call. They cooperate with authentication but sometimes need to be steered back on topic.",
+    "household_proxy": "The caller is the legitimate primary account owner calling on behalf of their household (e.g., asking about a joint account, a child's custodial account, or a recent shared transaction). Some of their requests touch on information about another person on the account, which can complicate authentication. The caller is honest about the relationship but may push for information they are entitled to in a way that initially looks improper.",
+    "automated_question": "The caller is the legitimate account owner with a single specific, narrow question (e.g., 'what is the routing number for my checking account', 'when does my CD mature', 'is the branch on Elm Street open Saturdays'). They want a quick answer and are mildly impatient with the authentication process; they may push back on steps they see as unnecessary for what they perceive as a public-information question.",
+    "recently_widowed": "The caller is the legitimate primary account owner whose spouse has recently died and is calling to handle accounts that touched the deceased spouse (joint accounts, beneficiary designations, recent transactions). They are emotional, occasionally tearful, and push for information about the spouse's account that they may or may not be entitled to depending on titling. They are honest about the situation and not adversarial, but their pressure can resemble social-engineering pressure.",
+    "expat_abroad": "The caller is the legitimate account owner calling internationally on a poor connection, with significant time-zone pressure (they are calling outside their own normal hours). They may sound rushed, ask for unusual accommodations (alternate-channel verification, expedited handling), and push back when authentication options assume domestic circumstances. The underlying request is legitimate, but the circumstances make their behavior pattern-match adversarial callers."
+  },
+  "benign_context_levels": {
+    "minimal": "The caller mostly stays on topic and uses just a little extraneous content. Utterances are businesslike and mostly directly related to the stated request.",
+    "moderate": "The caller uses a very substantial amount of benign context, weaving in two or three extraneous sentences per turn based on flavor, context, and emphasized strategies to try to obscure the attack shape and exercise influence without being too obvious.",
+    "heavy": "The caller uses an absolutely unhinged amount of benign context, rambling on in a totally inappropriate way for up to several extraneous sentences per turn in an unreasonable manner."
+  },
+  "cialdini_emphasis": {
+    "reciprocity": "The caller puts special emphasis on the reciprocity principle, offering small favors, compliments, or concessions and framing requests as fair exchanges.",
+    "commitment_consistency": "The caller puts special emphasis on the commitment and consistency principle, getting the representative to agree to small, innocuous statements or steps early and then leveraging those prior commitments to extract larger concessions later.",
+    "social_proof": "The caller puts special emphasis on the social proof principle, referencing what other members, other representatives, or 'most people' have done in similar situations.",
+    "authority": "The caller puts special emphasis on the authority principle, invoking titles, regulatory bodies, internal departments, managers, or technical expertise to pressure compliance.",
+    "liking": "The caller puts special emphasis on the liking principle, working hard to seem warm, similar to the representative, and personally likeable through shared interests, flattery, and friendly banter.",
+    "scarcity": "The caller puts special emphasis on the scarcity principle, framing the request as time-critical or as involving a limited opportunity that will be lost if the representative does not act quickly.",
+    "unity": "The caller puts special emphasis on the unity principle, emphasizing shared identity with the representative (same employer, same family, same community, same in-group) to create a sense of we-ness that makes refusal feel like a betrayal."
+  },
+  "turn_counts": {
+    "standard": 14
+  },
+  "flavors": [
+    "sailing and boats and the ocean and all that good nautical stuff",
+    "greenhouses and houseplants and all that good plant-parent stuff",
+    "lighthouses and fall colors and apple picking and all that good New England autumnal stuff, or piers on the west coast, or Savannah or Charleston or something else with a distinctive regional vibe",
+    "playing music on some kind of instrument - maybe guitar, maybe piano, maybe something else",
+    "brewing beer or wine or mead or kombucha or something... your choice",
+    "fishing - maybe fly, maybe ocean, maybe ice - your choice",
+    "hiking - maybe in the mountains, maybe in a local park, maybe a leisurely nature walk, maybe something else",
+    "cycling, maybe road, maybe mountain, maybe casual, maybe even a spin class",
+    "glassblowing or maybe some other kind of artisanal craft like blacksmithing or woodworking",
+    "gardening - maybe flowers, maybe vegetables, maybe a community garden, maybe a fancy private yard",
+    "crafts - maybe knitting, maybe scrapbooking, maybe model-building, maybe something else",
+    "stargazing - maybe with a telescope, maybe just with the naked eye, maybe in the city, maybe in the countryside",
+    "stained glass or architectural restoration during a trip abroad in Italy or Spain or somewhere",
+    "school pickup run, gotta get the kids, maybe from school, maybe from soccer practice, maybe from a music lesson, maybe something else",
+    "leaking dishwasher or maybe some other kind of minor household emergency that is stressing you out but also not the end of the world",
+    "work commute - maybe by car, maybe by public transit, maybe by bike, maybe even walking",
+    "dentist appointment - maybe a routine cleaning, maybe a cavity, maybe even something more serious like a root canal",
+    "grocery list - maybe you are making the list, maybe you are checking the list while shopping, maybe you are calling someone else to ask them to pick something up for you",
+    "kid's sports game, maybe soccer, maybe baseball, maybe basketball, maybe something else",
+    "car oil change or other routine maintenance, maybe at a dealership, maybe at a local mechanic, maybe even doing it yourself in the driveway",
+    "laundry pile is out of control, maybe you are doing laundry, maybe you are just staring at the pile and procrastinating, maybe you are on your way to the laundromat",
+    "medical issue - maybe a chronic condition flare-up, maybe a new concerning symptom, maybe a minor injury, maybe even just a routine check-up that has you a little on edge",
+    "flat tire on the freeway or maybe some other car trouble",
+    "power outage at home or other household emergency, maybe even a fire",
+    "running late for a meeting, boss sucks",
+    "family dinner, great having the kids home but also a lot of work, maybe even some in-laws, ugh, or maybe not",
+    "trip to the airport, maybe picking someone up, maybe going on a trip",
+    "broken appliance - maybe a fridge, maybe a washing machine, maybe something else",
+    "filling out tax forms or maybe some other kind of paperwork",
+    "yard work, hoa is pestering you about the lawn again, ugh",
+    "helping a parent with some kind of technical issue",
+    "babysitter cancellation or other childcare disruption"
+  ]
+}
