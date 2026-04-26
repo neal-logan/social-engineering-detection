@@ -1,0 +1,7 @@
+gradio>=4.44
+python-dotenv>=1.0
+openpyxl>=3.1
+# The following come from your existing project; the demo imports them.
+# Listed here so a fresh venv has everything needed to run app.py.
+openai>=1.40
+tqdm>=4.66

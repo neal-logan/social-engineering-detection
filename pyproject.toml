@@ -18,4 +18,5 @@ dependencies = [
     "matplotlib>=3.8",
     "plotly>=5.20",
     "kaleido>=0.2",
+    "gradio>=6.13.0",
 ]
