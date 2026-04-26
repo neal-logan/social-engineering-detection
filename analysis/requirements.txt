@@ -1,0 +1,27 @@
+# Analysis-module runtime dependencies.
+#
+# Lower bounds reflect versions verified during development. Upper bounds
+# are intentionally absent so the package can be combined with the upstream
+# detection_pipeline / conversation_generation requirements without
+# version-spec conflicts; pin tighter if you build a frozen environment.
+
+# Core data
+pandas>=2.2
+numpy>=1.26
+
+# Excel I/O for detection_metadata.xlsx (used by pandas.read_excel)
+openpyxl>=3.1
+
+# Ibis with the DuckDB backend powers query.py
+ibis-framework[duckdb]>=9.0
+
+# Plotting
+matplotlib>=3.8
+
+# Sankey diagrams in figures.py (imported lazily; only required if you
+# call figures.sankey_threat_to_outcomes)
+plotly>=5.20
+
+# Optional: enables PNG/SVG export of Sankey figures via plotly.
+# Without it the Sankey is still saved as HTML. Uncomment to install.
+# kaleido>=0.2
