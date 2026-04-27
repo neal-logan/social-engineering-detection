@@ -138,36 +138,43 @@ with gr.Blocks(title="SE Detection Demo — UNC Charlotte") as demo:
                     static_turns    = gr.Dropdown(label="Turn count", choices=[], visible=False, interactive=True)
 
                     gr.HTML('<div class="section-label">Detection filter</div>')
-                    static_stance = gr.Dropdown(
-                        label="Stance (require detection by)",
+                    static_pv_stance = gr.Dropdown(
+                        label="PV stance",
+                        choices=[ui.RANDOM_SENTINEL] + DETECTION_STANCES,
+                        value=ui.RANDOM_SENTINEL,
+                        interactive=True,
+                    )
+                    static_se_stance = gr.Dropdown(
+                        label="SE stance",
                         choices=[ui.RANDOM_SENTINEL] + DETECTION_STANCES,
                         value=ui.RANDOM_SENTINEL,
                         interactive=True,
                     )
                     if not STANCE_INDEX:
                         gr.Markdown(
-                            "_No detection metadata found — the stance filter is a no-op._",
+                            "_No detection metadata found — stance filters are a no-op._",
                             elem_classes="section-help",
                         )
 
                     static_status = gr.HTML(ui.render.render_status("idle", "select a template"))
                     static_pick_btn = gr.Button("🎲 Pick random match", interactive=False, elem_classes="primary-btn")
-
+                    static_play_btn = gr.Button("▶ Play", interactive=False, elem_classes="primary-btn")
                     with gr.Row():
-                        static_prev_btn = gr.Button("◀ Prev", interactive=False, elem_classes="secondary-btn")
-                        static_next_btn = gr.Button("Next ▶", interactive=False, elem_classes="secondary-btn")
+                        static_stop_btn = gr.Button("⏹ Stop", elem_classes="secondary-btn")
+                        static_clear_btn = gr.Button("✕ Clear", elem_classes="secondary-btn")
 
                     gr.Markdown(
                         "_🎲 Random in any dropdown leaves that dimension unfiltered. "
-                        f"After picking, step through turn-by-turn — detection scores appear "
-                        f"~{int(config.STATIC_DETECTION_DELAY_S * 1000)} ms after each turn._",
+                        "After picking a match, click ▶ Play to replay the conversation "
+                        "with stored detection results._",
                         elem_classes="section-help",
                     )
 
-                with gr.Column(scale=2):
+                with gr.Column(scale=3):
                     static_chat = gr.HTML(ui.render.render_chat([], 0))
 
-            static_state = gr.State({"turns": [], "step": 0, "detection": {}, "id": None})
+            static_state = gr.State({"record": None, "turns": [], "detection": {},
+                                     "stored_detection": {}, "id": None})
 
             static_dim_dropdowns = [
                 static_scenario, static_rep, static_caller,
@@ -182,49 +189,61 @@ with gr.Blocks(title="SE Detection Demo — UNC Charlotte") as demo:
                 outputs=(
                     static_dim_dropdowns
                     + [static_status, static_chat, static_state,
-                       static_pick_btn, static_prev_btn, static_next_btn]
+                       static_pick_btn, static_play_btn]
                 ),
             )
 
             # Any dim or stance dropdown change: recompute matching count + pick button.
-            for dd in static_dim_dropdowns + [static_stance]:
+            for dd in static_dim_dropdowns + [static_pv_stance, static_se_stance]:
                 dd.change(
                     fn=ui.static_count_matches,
                     inputs=[
                         static_template,
                         static_scenario, static_rep, static_caller,
                         static_benign, static_cial, static_turns,
-                        static_stance,
+                        static_pv_stance, static_se_stance,
                         dimensions_state, static_lookup_state,
                         static_stance_index_state,
                     ],
                     outputs=[static_status, static_pick_btn],
                 )
 
-            # Pick a random match and load it.
+            # Pick a random match and load it (no playback yet — Play button starts that).
             static_pick_btn.click(
                 fn=ui.static_pick_random,
                 inputs=[
                     static_template,
                     static_scenario, static_rep, static_caller,
                     static_benign, static_cial, static_turns,
-                    static_stance,
+                    static_pv_stance, static_se_stance,
                     dimensions_state, static_lookup_state,
                     static_stance_index_state,
                 ],
-                outputs=[static_chat, static_state, static_status,
-                         static_prev_btn, static_next_btn],
+                outputs=[static_chat, static_state, static_status, static_play_btn],
             )
 
-            static_prev_btn.click(
-                fn=lambda s: ui.static_step(s, -1),
+            # Play: replay the loaded conversation with the same word-by-word
+            # transcription as dynamic mode, using stored detection from xlsx.
+            static_play_event = static_play_btn.click(
+                fn=ui.static_play,
                 inputs=[static_state],
-                outputs=[static_chat, static_state, static_status, static_prev_btn, static_next_btn],
+                outputs=[static_chat, static_state, static_status],
             )
-            static_next_btn.click(
-                fn=lambda s: ui.static_step(s, +1),
+
+            # Stop: cancel any in-progress replay; leave chat as-is.
+            static_stop_btn.click(
+                fn=lambda: ui.render.render_status("idle", "stopped"),
+                inputs=None,
+                outputs=[static_status],
+                cancels=[static_play_event],
+            )
+
+            # Clear: wipe the chat back to empty (keeps loaded conversation
+            # in state so user can replay).
+            static_clear_btn.click(
+                fn=ui.static_clear,
                 inputs=[static_state],
-                outputs=[static_chat, static_state, static_status, static_prev_btn, static_next_btn],
+                outputs=[static_chat, static_state, static_status],
             )
 
             # Initial population: trigger the template-change handler once on
@@ -235,7 +254,7 @@ with gr.Blocks(title="SE Detection Demo — UNC Charlotte") as demo:
                 outputs=(
                     static_dim_dropdowns
                     + [static_status, static_chat, static_state,
-                       static_pick_btn, static_prev_btn, static_next_btn]
+                       static_pick_btn, static_play_btn]
                 ),
             )
 
@@ -277,7 +296,6 @@ with gr.Blocks(title="SE Detection Demo — UNC Charlotte") as demo:
                     dyn_turns      = gr.Dropdown(label="Turn count", choices=[], visible=False, interactive=True)
                     dyn_turns_cust = gr.Textbox(label="Custom turn count", visible=False, lines=1)
 
-                    gr.HTML('<div class="section-label">Flavor</div>')
                     dyn_flavor = gr.Dropdown(
                         label="Flavor",
                         choices=[ui.RANDOM_SENTINEL] + FLAVORS,
@@ -285,52 +303,51 @@ with gr.Blocks(title="SE Detection Demo — UNC Charlotte") as demo:
                         interactive=True,
                     )
 
-                    gr.HTML('<div class="section-label">Generation settings</div>')
-                    with gr.Row():
-                        dyn_model = gr.Textbox(
-                            label="Model",
-                            value=config.DEFAULT_GENERATION_MODEL,
-                            interactive=True,
-                        )
-                    with gr.Row():
-                        dyn_temp = gr.Number(
-                            label="Temperature",
-                            value=config.DEFAULT_GENERATION_TEMPERATURE,
-                            precision=2,
-                            interactive=True,
-                        )
-                        dyn_top_p = gr.Number(
-                            label="Top-p",
-                            value=config.DEFAULT_GENERATION_TOP_P,
-                            precision=2,
-                            interactive=True,
-                        )
-
-                    gr.HTML('<div class="section-label">Detection settings</div>')
+                    gr.HTML('<div class="section-label">Model settings</div>')
+                    dyn_model = gr.Textbox(
+                        label="Generation model",
+                        value=config.DEFAULT_GENERATION_MODEL,
+                        interactive=True,
+                    )
                     dyn_detection_model = gr.Textbox(
                         label="Detection model",
                         value=config.DEFAULT_DETECTION_MODEL,
                         interactive=True,
                     )
-                    dyn_stance = gr.Dropdown(
-                        label="Stance",
+
+                    gr.HTML('<div class="section-label">Detection stance</div>')
+                    dyn_pv_stance = gr.Dropdown(
+                        label="PV stance",
                         choices=[ui.RANDOM_SENTINEL, ui.CUSTOM_SENTINEL] + DETECTION_STANCES,
                         value=ui.RANDOM_SENTINEL,
                         interactive=True,
                     )
-                    dyn_stance_custom = gr.Textbox(
-                        label="Custom stance instruction",
+                    dyn_pv_stance_custom = gr.Textbox(
+                        label="Custom PV stance instruction",
                         visible=False,
                         lines=3,
-                        placeholder="Free-text instructions to give the detection model. "
-                                    "E.g., 'Bias strongly toward flagging anything that even mildly "
-                                    "resembles social engineering, including borderline cases.'",
+                        placeholder="Free-text instructions for the policy-violation detector.",
+                    )
+                    dyn_se_stance = gr.Dropdown(
+                        label="SE stance",
+                        choices=[ui.RANDOM_SENTINEL, ui.CUSTOM_SENTINEL] + DETECTION_STANCES,
+                        value=ui.RANDOM_SENTINEL,
+                        interactive=True,
+                    )
+                    dyn_se_stance_custom = gr.Textbox(
+                        label="Custom SE stance instruction",
+                        visible=False,
+                        lines=3,
+                        placeholder="Free-text instructions for the social-engineering detector.",
                     )
 
                     dyn_run_btn = gr.Button("Generate & Run", elem_classes="primary-btn")
+                    with gr.Row():
+                        dyn_stop_btn = gr.Button("⏹ Stop", elem_classes="secondary-btn")
+                        dyn_clear_btn = gr.Button("✕ Clear", elem_classes="secondary-btn")
                     dyn_status = gr.HTML(ui.render.render_status("idle"))
 
-                with gr.Column(scale=2):
+                with gr.Column(scale=3):
                     dyn_chat = gr.HTML(ui.render.render_chat([], 0))
 
             dyn_state = gr.State({"turns": [], "step": 0, "detection": {}, "id": None})
@@ -360,11 +377,12 @@ with gr.Blocks(title="SE Detection Demo — UNC Charlotte") as demo:
             ]:
                 dd.change(fn=ui.custom_visibility, inputs=[dd], outputs=[txt])
 
-            # Show stance custom textbox only when "Custom..." picked
-            dyn_stance.change(fn=ui.custom_visibility, inputs=[dyn_stance], outputs=[dyn_stance_custom])
+            # Show stance custom textboxes only when "Custom..." picked
+            dyn_pv_stance.change(fn=ui.custom_visibility, inputs=[dyn_pv_stance], outputs=[dyn_pv_stance_custom])
+            dyn_se_stance.change(fn=ui.custom_visibility, inputs=[dyn_se_stance], outputs=[dyn_se_stance_custom])
 
             # ---- Run
-            dyn_run_btn.click(
+            dyn_run_event = dyn_run_btn.click(
                 fn=ui.dynamic_generate_and_run,
                 inputs=[
                     dimensions_state, dyn_template,
@@ -375,10 +393,29 @@ with gr.Blocks(title="SE Detection Demo — UNC Charlotte") as demo:
                     dyn_cial, dyn_cial_cust,
                     dyn_turns, dyn_turns_cust,
                     dyn_flavor,
-                    dyn_model, dyn_temp, dyn_top_p,
+                    dyn_model,
                     dyn_detection_model,
-                    dyn_stance, dyn_stance_custom,
+                    dyn_pv_stance, dyn_pv_stance_custom,
+                    dyn_se_stance, dyn_se_stance_custom,
                 ],
+                outputs=[dyn_chat, dyn_state, dyn_status],
+            )
+
+            # Stop: cancel any in-progress run; leave chat as-is so user can
+            # see where it stopped. Also flips status to "stopped".
+            dyn_stop_btn.click(
+                fn=lambda: ui.render.render_status("idle", "stopped"),
+                inputs=None,
+                outputs=[dyn_status],
+                cancels=[dyn_run_event],
+            )
+
+            # Clear: reset chat + state. Doesn't cancel in-progress run
+            # (use Stop for that first). The chat is overwritten regardless,
+            # which effectively clears the visible content.
+            dyn_clear_btn.click(
+                fn=ui.dynamic_clear,
+                inputs=None,
                 outputs=[dyn_chat, dyn_state, dyn_status],
             )
 

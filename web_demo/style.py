@@ -72,8 +72,8 @@ CSS = f"""
     border: 1px solid var(--uncc-grey-light);
     border-radius: 6px;
     padding: 14px 16px;
-    min-height: 480px;
-    max-height: 560px;
+    min-height: 600px;
+    max-height: 760px;
     overflow-y: auto;
     font-size: 14px;
     line-height: 1.5;
@@ -108,6 +108,36 @@ CSS = f"""
     color: var(--uncc-text);
     margin: 4px 0 6px 0;
     white-space: pre-wrap;
+}}
+
+/* Two-column layout: text on left, detection on right.
+   Flex with align-items: start so they share top edge. */
+.turn-body {{
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+    margin-top: 4px;
+}}
+.turn-body-left {{
+    flex: 1 1 auto;
+    min-width: 0;       /* allow text wrapping inside flex */
+}}
+.turn-body-right {{
+    flex: 0 0 280px;    /* fixed width for detection panel */
+    max-width: 320px;
+}}
+.turn-body-right:empty {{
+    display: none;
+}}
+/* On narrow viewports, stack instead of side-by-side */
+@media (max-width: 900px) {{
+    .turn-body {{
+        flex-direction: column;
+    }}
+    .turn-body-right {{
+        flex: 0 0 auto;
+        max-width: 100%;
+    }}
 }}
 
 /* Flag chips */
@@ -224,9 +254,13 @@ CSS = f"""
 /* Detection result boxes — large, status-driven typography */
 .det-box {{
     border-radius: 6px;
-    padding: 14px 16px;
-    margin: 8px 0;
+    padding: 10px 12px;
+    margin: 0 0 6px 0;
     font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}}
+.det-box:last-child {{ margin-bottom: 0; }}
+.detection-panel-v2 {{
+    margin: 0;
 }}
 .det-box-detected {{
     background: rgba(220, 38, 38, 0.06);
@@ -245,10 +279,10 @@ CSS = f"""
     border-left: 4px solid var(--uncc-grey);
 }}
 .det-box-headline {{
-    font-size: 18px;
+    font-size: 14px;
     font-weight: 600;
     letter-spacing: 0.005em;
-    line-height: 1.3;
+    line-height: 1.25;
 }}
 .det-box-headline-detected {{ color: #dc2626; }}
 .det-box-headline-clear    {{ color: #2563eb; opacity: 0.85; }}

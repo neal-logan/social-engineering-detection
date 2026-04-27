@@ -148,8 +148,11 @@ def static_template_changed(
 
     Returns 6 dropdown updates (one per dimension) followed by the
     matching-count + state-reset payload (count_html, chat, state,
-    pick_btn, prev_btn, next_btn).
+    pick_btn, play_btn).
     """
+    empty_state = {"record": None, "turns": [], "detection": {},
+                   "stored_detection": {}, "id": None,
+                   "pv_stance": None, "se_stance": None}
     if not template_key or template_key not in dimensions.get("prompt_templates", {}):
         # Nothing selected: hide all dim dropdowns, clear chat.
         hidden = gr.update(visible=False)
@@ -157,10 +160,9 @@ def static_template_changed(
         return [hidden] * 6 + [
             n_match_html,
             render.render_chat([], 0),
-            {"turns": [], "step": 0, "detection": {}, "id": None},
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
+            empty_state,
+            gr.update(interactive=False),  # pick button
+            gr.update(interactive=False),  # play button
         ]
 
     dim_map = _template_dim_map(dimensions, template_key)
@@ -231,10 +233,9 @@ def static_template_changed(
     return updates + [
         render.render_status("idle", count_msg),
         chat_html,
-        {"turns": [], "step": 0, "detection": {}, "id": None},
+        empty_state,
         gr.update(interactive=n > 0),  # pick button
-        gr.update(interactive=False),  # prev
-        gr.update(interactive=False),  # next
+        gr.update(interactive=False),  # play button (no conversation loaded yet)
     ]
 
 
@@ -243,49 +244,104 @@ def _matching_conversations(
     dim_map: dict[str, str],
     field_labels: dict[str, str],
     by_id: dict[str, dict],
-    stance_filter: str | None = None,
-    stance_index: dict[str, set[str]] | None = None,
+    pv_stance: str | None = None,
+    se_stance: str | None = None,
+    stance_index: dict[str, dict[str, set[str]]] | None = None,
+    dimensions: dict | None = None,
 ) -> list[dict]:
     """
-    Return all conversations matching the current filter set. Dropdown
-    labels in `field_labels` are dropdown labels (e.g. "polished: ...") or
-    RANDOM_SENTINEL; we resolve them to keys and require equality on
-    record['selection'][field].
+    Return all conversations matching the current filter set.
 
-    If `stance_filter` is a non-Random stance key and `stance_index` is
-    provided, also require that the conversation's id appears in
-    stance_index with that stance present (i.e. at least one Y/S
-    prediction was logged for that stance).
+    Dimension matching: each `field_labels` entry is a dropdown label
+    (e.g. "credit_union: <description...>") or RANDOM_SENTINEL. The
+    generator stores the rendered VALUE in `selection['scenario']` (etc.)
+    rather than the key, so we look up the chosen key in `dimensions` to
+    get the value and compare against that.
+
+    Stance matching is per-objective:
+      - pv_stance / se_stance: a stance key, RANDOM_SENTINEL, or empty.
+      - RANDOM_SENTINEL means "any stance fired for this objective"
+        (i.e., the conversation has at least one Y/S in any stance for
+        that objective).
+      - Empty/None means "don't filter by this objective".
+      - A specific stance key means "this stance fired Y/S for this
+        objective".
     """
     if not template_key:
         return []
 
-    # Resolve each field's chosen label to a key (or None if unfiltered).
-    chosen_keys: dict[str, str] = {}
+    dimensions = dimensions or {}
+
+    # Resolve each filter into the actual record-side value to compare against.
+    # For most dims: dropdown key -> dim value (textual description).
+    # For turn_count: dropdown key -> dim value (a number, stored in
+    # selection['turn_count_value']).
+    expected: dict[str, Any] = {}  # selection_field_name -> expected value
     for field, label in field_labels.items():
         if field not in dim_map:
             continue
         if not label or label == RANDOM_SENTINEL:
             continue
-        chosen_keys[field] = _label_to_key(label)
+        chosen_key = _label_to_key(label)
+        dim_name = dim_map[field]
+        dim_block = dimensions.get(dim_name, {})
+        if not isinstance(dim_block, dict):
+            continue
+        # Map filter field to the corresponding selection field name.
+        if field == "turn_count_key":
+            sel_field = "turn_count_value"
+        else:
+            sel_field = field[:-len("_key")] if field.endswith("_key") else field
+        # Look up the rendered value the record would have stored.
+        expected_value = dim_block.get(chosen_key)
+        if expected_value is None:
+            continue
+        expected[sel_field] = expected_value
 
-    use_stance = (
-        stance_filter and stance_filter != RANDOM_SENTINEL and stance_index is not None
-    )
-    stance_key = _label_to_key(stance_filter) if use_stance else None
+    # Stance filters. Per-task semantics:
+    #   - empty/None or RANDOM_SENTINEL => DON'T filter by stance for this task
+    #   - a specific stance key => require that stance to have fired Y/S
+    #     for that objective on this conversation.
+    def _filter_stance(arg: str | None) -> str | None:
+        """Normalize a stance filter input to a key, or None (no filter)."""
+        if not arg or arg == RANDOM_SENTINEL:
+            return None
+        return _label_to_key(arg)
+
+    pv_filter = _filter_stance(pv_stance) if stance_index is not None else None
+    se_filter = _filter_stance(se_stance) if stance_index is not None else None
 
     out = []
     for rec in by_id.values():
         if rec.get("prompt_template_key") != template_key:
             continue
         sel = rec.get("selection", {})
-        if not all(str(sel.get(f, "")) == k for f, k in chosen_keys.items()):
+
+        # Dimension filters
+        ok = True
+        for sel_field, expected_value in expected.items():
+            if str(sel.get(sel_field, "")) != str(expected_value):
+                ok = False
+                break
+        if not ok:
             continue
-        if use_stance:
+
+        # Stance filters (per-objective): only apply when a specific stance
+        # was chosen, not on Random.
+        if pv_filter is not None or se_filter is not None:
             cid = rec.get("request_id", "")
-            stances_with_hits = stance_index.get(cid, set())
-            if stance_key not in stances_with_hits:
-                continue
+            stances_per_obj = (stance_index or {}).get(cid, {})
+
+            if pv_filter is not None:
+                pv_stances = stances_per_obj.get("policy_violation", set())
+                if pv_filter not in pv_stances:
+                    continue
+
+            if se_filter is not None:
+                se_stances = stances_per_obj.get("social_engineering", set())
+                if se_filter not in se_stances:
+                    continue
+
         out.append(rec)
     return out
 
@@ -298,10 +354,11 @@ def static_count_matches(
     benign_label: str,
     cialdini_label: str,
     turn_count_label: str,
-    stance_label: str,
+    pv_stance_label: str,
+    se_stance_label: str,
     dimensions: dict,
     by_id: dict[str, dict],
-    stance_index: dict[str, set[str]],
+    stance_index: dict[str, dict[str, set[str]]],
 ):
     """
     Recompute the matching-count display when any filter changes.
@@ -324,10 +381,25 @@ def static_count_matches(
     }
     matches = _matching_conversations(
         template_key, dim_map, field_labels, by_id,
-        stance_filter=stance_label, stance_index=stance_index,
+        pv_stance=pv_stance_label, se_stance=se_stance_label,
+        stance_index=stance_index, dimensions=dimensions,
     )
     n = len(matches)
     if n == 0:
+        # Diagnose: print to terminal what the user picked and one example
+        # record's selection values for that template — most useful when
+        # the user filter never matches and we can't tell why from the UI.
+        active_filters = {f: lab for f, lab in field_labels.items()
+                          if lab and lab != RANDOM_SENTINEL}
+        if active_filters:
+            print(f"[static] 0 matches for template={template_key!r}, "
+                  f"filters={active_filters}, "
+                  f"pv_stance={pv_stance_label!r}, se_stance={se_stance_label!r}")
+            for rec in by_id.values():
+                if rec.get("prompt_template_key") == template_key:
+                    sel = rec.get("selection", {})
+                    print(f"[static] sample record selection: {sel}")
+                    break
         return (
             render.render_status("idle", "no matching conversation"),
             gr.update(interactive=False),
@@ -347,21 +419,24 @@ def static_pick_random(
     benign_label: str,
     cialdini_label: str,
     turn_count_label: str,
-    stance_label: str,
+    pv_stance_label: str,
+    se_stance_label: str,
     dimensions: dict,
     by_id: dict[str, dict],
-    stance_index: dict[str, set[str]],
+    stance_index: dict[str, dict[str, set[str]]],
 ):
     """
-    Pick a random conversation matching the current filter set and render
-    its first turn. Returns updates for (chat, state, status, prev_btn, next_btn).
+    Pick a random conversation matching the current filter set and load it.
+    Returns updates for (chat, state, status, play_btn).
     """
+    empty_state = {"record": None, "turns": [], "detection": {},
+                   "stored_detection": {}, "id": None,
+                   "pv_stance": None, "se_stance": None}
     if not template_key:
         return (
             render.render_chat([], 0),
-            {"turns": [], "step": 0, "detection": {}, "id": None},
+            empty_state,
             render.render_status("idle", "select a template"),
-            gr.update(interactive=False),
             gr.update(interactive=False),
         )
 
@@ -376,108 +451,106 @@ def static_pick_random(
     }
     matches = _matching_conversations(
         template_key, dim_map, field_labels, by_id,
-        stance_filter=stance_label, stance_index=stance_index,
+        pv_stance=pv_stance_label, se_stance=se_stance_label,
+        stance_index=stance_index, dimensions=dimensions,
     )
     if not matches:
         return (
             render.render_chat([], 0),
-            {"turns": [], "step": 0, "detection": {}, "id": None},
+            empty_state,
             render.render_status("idle", "no matching conversation"),
-            gr.update(interactive=False),
             gr.update(interactive=False),
         )
     rec = random.choice(matches)
-    return static_select_conversation(rec.get("request_id", ""), by_id)
+    return static_select_conversation(
+        rec.get("request_id", ""), by_id,
+        pv_stance_label=pv_stance_label,
+        se_stance_label=se_stance_label,
+        stance_index=stance_index,
+    )
 
 
 def static_select_conversation(
     conv_id: str,
     by_id: dict[str, dict],
+    *,
+    pv_stance_label: str = RANDOM_SENTINEL,
+    se_stance_label: str = RANDOM_SENTINEL,
+    stance_index: dict[str, dict[str, set[str]]] | None = None,
 ):
-    """Selecting a conversation resets the step counter and renders turn 0."""
+    """
+    Load a conversation into state for static play. Returns (chat, state,
+    status, play_btn). The chat shows nothing until Play is clicked.
+
+    `stored_detection` is filtered to keep only the chosen stance per
+    objective. RANDOM means pick one of the stances that fired Y/S for
+    that objective on this conversation; if none fired, pick any preset
+    stance to display its (presumably all-N) results.
+    """
+    empty_state = {"record": None, "turns": [], "detection": {},
+                   "stored_detection": {}, "id": None,
+                   "pv_stance": None, "se_stance": None}
     if not conv_id or conv_id not in by_id:
         return (
             render.render_chat([], 0),
-            {"turns": [], "step": 0, "detection": {}, "id": None},
+            empty_state,
             render.render_status("idle", "no conversation"),
-            gr.update(interactive=False),
             gr.update(interactive=False),
         )
     rec = by_id[conv_id]
     turns = rec.get("conversation", {}).get("turns", []) or []
-    detection = adapters.load_detection_results(conv_id) or {}
+    raw_stored = adapters.load_detection_results(conv_id) or {}
+
+    # Resolve the chosen stance per objective. Random => pick one of the
+    # stances that actually fired Y/S for that conversation; if none did,
+    # fall back to a random preset stance.
+    presets = ("high_precision", "balanced", "high_recall")
+    rec_stances_per_obj = (stance_index or {}).get(conv_id, {}) if stance_index else {}
+
+    def _resolve(label: str, objective: str) -> str | None:
+        if not label or label == RANDOM_SENTINEL:
+            fired = list(rec_stances_per_obj.get(objective, set()))
+            if fired:
+                return random.choice(fired)
+            return random.choice(presets)
+        return _label_to_key(label)
+
+    pv_chosen = _resolve(pv_stance_label, "policy_violation")
+    se_chosen = _resolve(se_stance_label, "social_engineering")
+
+    # Filter raw_stored: keep only the chosen stance per objective.
+    keep_keys = set()
+    if pv_chosen:
+        keep_keys.add(f"policy_violation__{pv_chosen}")
+    if se_chosen:
+        keep_keys.add(f"social_engineering__{se_chosen}")
+
+    stored_detection: dict[int, dict[str, dict[str, Any]]] = {}
+    for turn_idx, det in raw_stored.items():
+        filt = {k: v for k, v in det.items() if k in keep_keys}
+        if filt:
+            stored_detection[turn_idx] = filt
+
     state = {
+        "record": rec,
         "turns": turns,
-        "step": 1 if turns else 0,
-        "detection": detection,
+        "detection": {},
+        "stored_detection": stored_detection,
         "id": conv_id,
+        "pv_stance": pv_chosen,
+        "se_stance": se_chosen,
     }
     return (
-        render.render_chat(turns, state["step"], None),  # detection added by stepper
+        render.render_chat([], 0),
         state,
-        render.render_status("idle", f"{len(turns)} turns loaded"),
-        gr.update(interactive=False),                    # prev disabled at step 1
-        gr.update(interactive=len(turns) > 1),           # next enabled if >1 turn
+        render.render_status(
+            "idle",
+            f"{len(turns)} turns loaded — PV={pv_chosen}, SE={se_chosen} — click Play"
+        ),
+        gr.update(interactive=len(turns) > 0),
     )
 
 
-def static_step(state: dict, direction: int):
-    """
-    Generator: yields chat html in two phases per step --
-        1. immediately render through state['step'] turns with PENDING
-           detection boxes on the latest turn
-        2. after a small delay, render again WITH detection (where available)
-    """
-    turns = state.get("turns", [])
-    if not turns:
-        yield (render.render_chat([], 0), state,
-               render.render_status("idle"), gr.update(), gr.update())
-        return
-
-    step = max(1, min(len(turns), state.get("step", 1) + direction))
-    state["step"] = step
-
-    # Determine objective for pending boxes on the latest turn (step-1).
-    latest_turn_idx = step - 1
-    speaker = adapters._speaker_for_turn(latest_turn_idx)
-    if speaker == "representative" and latest_turn_idx > 0:
-        pending_obj = "policy_violation"
-    elif speaker == "caller":
-        pending_obj = "social_engineering"
-    else:
-        pending_obj = None
-
-    detection = state.get("detection") or {}
-
-    # Phase 1: pending boxes on the latest turn (only if we don't already
-    # have results for it from the precomputed metadata).
-    if pending_obj and latest_turn_idx not in detection:
-        phase1_chat = render.render_chat(
-            turns, step, detection,
-            pending_for_turn=latest_turn_idx,
-            pending_objective=pending_obj,
-            pending_stances=["high_precision", "balanced", "high_recall"],
-        )
-    else:
-        phase1_chat = render.render_chat(turns, step, detection)
-
-    yield (
-        phase1_chat,
-        state,
-        render.render_status("running", f"turn {step-1}"),
-        gr.update(interactive=step > 1),
-        gr.update(interactive=step < len(turns)),
-    )
-
-    # Phase 2: detection appears after delay.
-    time.sleep(config.STATIC_DETECTION_DELAY_S)
-    yield (
-        render.render_chat(turns, step, detection),
-        state,
-        render.render_status("done", f"turn {step-1} of {len(turns)-1}"),
-        gr.update(interactive=step > 1),
-        gr.update(interactive=step < len(turns)),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +651,15 @@ def custom_visibility(dropdown_value: str):
     return gr.update(visible=(dropdown_value == CUSTOM_SENTINEL))
 
 
+def dynamic_clear():
+    """Reset the dynamic-mode chat to its empty state."""
+    return (
+        render.render_chat([], 0),
+        {"turns": [], "step": 0, "detection": {}, "id": None},
+        render.render_status("idle"),
+    )
+
+
 def dynamic_generate_and_run(
     dimensions: dict,
     template_key: str,
@@ -588,10 +670,12 @@ def dynamic_generate_and_run(
     cialdini_label: str, cialdini_custom: str,
     turn_count_label: str, turn_count_custom: str,
     flavor_label: str,
-    model: str, temperature: float, top_p: float,
+    model: str,
     detection_model: str,
-    stance_label: str,
-    stance_custom: str,
+    pv_stance_label: str,
+    pv_stance_custom: str,
+    se_stance_label: str,
+    se_stance_custom: str,
 ):
     """
     Generator yielding UI updates as the demo progresses through:
@@ -602,10 +686,11 @@ def dynamic_generate_and_run(
 
     Detection args:
       detection_model: model used for the detection calls.
-      stance_label: a stance key (e.g. "balanced"), RANDOM_SENTINEL (run all
-        preset stances), or CUSTOM_SENTINEL (run only the custom stance).
-      stance_custom: free-text stance instruction; used when
-        stance_label == CUSTOM_SENTINEL.
+      pv_stance_label / se_stance_label: per-task stance choice — a stance
+        key, RANDOM_SENTINEL (pick one preset stance at random), or
+        CUSTOM_SENTINEL (use the custom instruction).
+      pv_stance_custom / se_stance_custom: free-text stance instructions
+        used when the corresponding label == CUSTOM_SENTINEL.
     """
     # ---- Build selection
     dim_map = _template_dim_map(dimensions, template_key)
@@ -613,8 +698,8 @@ def dynamic_generate_and_run(
     selection: dict[str, Any] = {
         "prompt_template_key": template_key,
         "model": model,
-        "temperature": temperature,
-        "top_p": top_p,
+        "temperature": config.DEFAULT_GENERATION_TEMPERATURE,
+        "top_p": config.DEFAULT_GENERATION_TOP_P,
         "caller_dim_name": dim_map.get("caller_key"),
     }
 
@@ -683,20 +768,83 @@ def dynamic_generate_and_run(
         )
         return
 
-    # ---- Resolve detection stance settings
-    if stance_label == RANDOM_SENTINEL or not stance_label:
-        stances_to_run: list[str] = []  # empty -> run all preset stances
-        stance_text = ""
-    elif stance_label == CUSTOM_SENTINEL:
-        stances_to_run = ["__custom__"]
-        stance_text = stance_custom or ""
-    else:
-        stances_to_run = [_label_to_key(stance_label)]
-        stance_text = ""
+    # ---- Resolve per-task stance settings.
+    # For each task: Random => pick one preset stance at random; Custom =>
+    # use __custom__ with the supplied text; otherwise => the chosen preset.
+    presets = ("high_precision", "balanced", "high_recall")
 
-    # ---- Phase 2: transcribe + score per turn
-    detection: dict[int, dict[str, dict[str, Any]]] = {}
+    def _resolve_stance(label: str, custom_text: str) -> tuple[str, str]:
+        """Return (stance_key, custom_text). custom_text is only non-empty
+        when stance_key is '__custom__'."""
+        if label == CUSTOM_SENTINEL:
+            return ("__custom__", custom_text or "")
+        if label == RANDOM_SENTINEL or not label:
+            return (random.choice(presets), "")
+        return (_label_to_key(label), "")
+
+    pv_chosen_stance, pv_custom_text = _resolve_stance(pv_stance_label, pv_stance_custom)
+    se_chosen_stance, se_custom_text = _resolve_stance(se_stance_label, se_stance_custom)
+
+    def score_turn(i: int):
+        # Pick stance + custom-text by speaker on this turn.
+        speaker = adapters._speaker_for_turn(i)
+        if speaker == "representative":
+            stance, custom = pv_chosen_stance, pv_custom_text
+        elif speaker == "caller":
+            stance, custom = se_chosen_stance, se_custom_text
+        else:
+            return {}
+        return adapters.score_turns_through(
+            record,
+            target_turn_index=i,
+            stances=[stance],
+            custom_stance_text=custom,
+            model=detection_model,
+        )
+
+    yield from _play_conversation(
+        record=record,
+        state=state,
+        score_turn=score_turn,
+        pv_stance=pv_chosen_stance,
+        se_stance=se_chosen_stance,
+        pending_delay_s=0.0,
+    )
+
+
+def _play_conversation(
+    record: dict,
+    state: dict,
+    score_turn,
+    pv_stance: str | None,
+    se_stance: str | None,
+    pending_delay_s: float = 0.0,
+):
+    """
+    Shared transcribe-and-score loop used by both modes.
+
+    Args:
+        record: a normalised conversation record (must have
+            record["conversation"]["turns"]).
+        state: mutable Gradio state dict; we set state["detection"].
+        score_turn: a callable `score_turn(turn_index) -> dict | exception`.
+        pv_stance: the stance key to render pending boxes for on
+            representative turns. None => no pending box rendered.
+        se_stance: the stance key to render pending boxes for on
+            caller turns. None => no pending box rendered.
+        pending_delay_s: extra sleep AFTER yielding pending boxes but
+            BEFORE calling score_turn — used by static mode to make the
+            pending boxes visible for ~600ms even though the lookup is
+            instant.
+
+    Yields (chat_html, state, status_html) tuples.
+    """
+    turns = record["conversation"]["turns"]
+    detection: dict[int, dict[str, dict[str, Any]]] = state.get("detection") or {}
+    state["detection"] = detection
+
     for i, turn in enumerate(turns):
+        # ---- Word-by-word transcription
         words = (turn.get("text") or "").split(" ")
         partial = ""
         for j, w in enumerate(words):
@@ -714,24 +862,19 @@ def dynamic_generate_and_run(
             )
             time.sleep(config.DYNAMIC_WORD_DELAY_S)
 
-        # Reveal complete turn (with actual flags) — no detection yet.
-        # Then yield again with PENDING boxes so the user sees activity
-        # while we wait for the detection API.
+        # ---- Pending-detection state
         speaker = adapters._speaker_for_turn(i)
         if speaker == "representative":
             pending_obj = "policy_violation"
+            pending_stance = pv_stance
         elif speaker == "caller":
             pending_obj = "social_engineering"
+            pending_stance = se_stance
         else:
             pending_obj = None
+            pending_stance = None
 
-        # Resolve which stances will actually run, for the pending boxes.
-        if stances_to_run:
-            pending_stance_list = list(stances_to_run)
-        else:
-            pending_stance_list = ["high_precision", "balanced", "high_recall"]
-
-        if i > 0 and pending_obj:
+        if i > 0 and pending_obj and pending_stance:
             yield (
                 render.render_chat(
                     turns,
@@ -739,11 +882,13 @@ def dynamic_generate_and_run(
                     detection_results=detection,
                     pending_for_turn=i,
                     pending_objective=pending_obj,
-                    pending_stances=pending_stance_list,
+                    pending_stances=[pending_stance],
                 ),
                 state,
                 render.render_status("running", f"scoring turn {i}..."),
             )
+            if pending_delay_s > 0:
+                time.sleep(pending_delay_s)
         else:
             yield (
                 render.render_chat(turns, visible_count=i + 1, detection_results=detection),
@@ -751,15 +896,9 @@ def dynamic_generate_and_run(
                 render.render_status("running", f"scoring turn {i}..."),
             )
 
-        # Detection call against truncated conversation.
+        # ---- Score the turn
         try:
-            det = adapters.score_turns_through(
-                record,
-                target_turn_index=i,
-                stances=stances_to_run,
-                custom_stance_text=stance_text,
-                model=detection_model,
-            )
+            det = score_turn(i)
         except NotImplementedError as e:
             yield (
                 render_error_in_chat(f"Detection adapter not wired (turn {i})", e),
@@ -777,8 +916,8 @@ def dynamic_generate_and_run(
 
         if det:
             detection[i] = det
-
         state["detection"] = detection
+
         yield (
             render.render_chat(turns, visible_count=i + 1, detection_results=detection),
             state,
@@ -786,9 +925,59 @@ def dynamic_generate_and_run(
         )
         time.sleep(config.DYNAMIC_INTER_TURN_DELAY_S)
 
-    # ---- Done.
     yield (
         render.render_chat(turns, visible_count=len(turns), detection_results=detection),
         state,
         render.render_status("done", f"complete — {len(turns)} turns"),
+    )
+
+
+def static_clear(state: dict):
+    """
+    Reset the chat to empty but keep the loaded conversation in state so
+    Play still works. To pick a fresh conversation, use Pick random match.
+    """
+    state = state or {}
+    # Preserve record + stored_detection so re-play still works.
+    state["detection"] = {}
+    return (
+        render.render_chat([], 0),
+        state,
+        render.render_status("idle", "cleared — click Play to replay"),
+    )
+
+
+def static_play(state: dict):
+    """
+    Static-mode generator. Replays a pre-loaded conversation with the same
+    word-by-word transcription as dynamic mode, using stored detection
+    results from xlsx instead of live API calls. Only one stance per
+    objective is displayed (the one chosen at conversation-load time).
+    """
+    record = state.get("record")
+    if not record:
+        yield (
+            render.render_chat([], 0),
+            state,
+            render.render_status("idle", "no conversation loaded"),
+        )
+        return
+
+    stored = state.get("stored_detection") or {}
+    pv_stance = state.get("pv_stance")
+    se_stance = state.get("se_stance")
+
+    def score_turn(i: int):
+        return stored.get(i, {})
+
+    # Reset accumulated detection so a re-play starts fresh.
+    state["detection"] = {}
+
+    yield from _play_conversation(
+        record=record,
+        state=state,
+        score_turn=score_turn,
+        pv_stance=pv_stance,
+        se_stance=se_stance,
+        pending_delay_s=0.6,
     )

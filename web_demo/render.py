@@ -156,7 +156,7 @@ def _render_one_detection_box(
         if obj == "social_engineering":
             headline = "SE attack not suspected"
         else:
-            headline = "Policy compliance detected"
+            headline = "Policy violation not suspected"
         cls = "det-box-clear"
         head_cls = "det-box-headline-clear"
     elif pred in ("X", "E"):
@@ -277,9 +277,15 @@ def render_turn(
         f'    <span class="{speaker_class}">{speaker_label}</span>'
         f'    <span class="turn-index">turn {turn_index}</span>'
         f'  </div>'
-        f'  <div class="turn-text">{text}</div>'
-        f'  {actual_flags}'
-        f'  {det_html}'
+        f'  <div class="turn-body">'
+        f'    <div class="turn-body-left">'
+        f'      <div class="turn-text">{text}</div>'
+        f'      {actual_flags}'
+        f'    </div>'
+        f'    <div class="turn-body-right">'
+        f'      {det_html}'
+        f'    </div>'
+        f'  </div>'
         f'</div>'
     )
 
@@ -348,7 +354,43 @@ def render_chat(
                         if k not in CIALDINI_KEYS + IMPROPER_KEYS}
         parts.append(render_turn(partial_turn, transcribing_index, None, transcribing=True))
     parts.append("</div>")
+    parts.append(_AUTOSCROLL_JS)
     return "".join(parts)
+
+
+# Auto-scroll: scroll the chat-window's nearest scrollable ancestor to the
+# bottom every time the chat re-renders. We walk up from .chat-window and
+# scroll the first ancestor whose scrollHeight exceeds its clientHeight.
+# Idempotent because we just unconditionally re-set scrollTop.
+_AUTOSCROLL_JS = """
+<script>
+(function() {
+  var windows = document.querySelectorAll('.chat-window');
+  if (!windows.length) return;
+  var win = windows[windows.length - 1];
+  // Find the nearest scrollable ancestor; if none, use win itself.
+  var node = win;
+  var scrollable = null;
+  while (node && node !== document.body) {
+    var s = window.getComputedStyle(node);
+    if ((s.overflowY === 'auto' || s.overflowY === 'scroll')
+        && node.scrollHeight > node.clientHeight) {
+      scrollable = node;
+      break;
+    }
+    node = node.parentElement;
+  }
+  var target = scrollable || win;
+  // Defer to allow DOM to settle before measuring.
+  requestAnimationFrame(function() {
+    target.scrollTop = target.scrollHeight;
+    // Also nudge window scroll so the chat panel itself stays in view as
+    // the page grows during streaming.
+    win.scrollIntoView({ block: 'end', behavior: 'auto' });
+  });
+})();
+</script>
+"""
 
 
 def render_status(state: str, message: str = "") -> str:

@@ -92,10 +92,27 @@ def _speaker_for_turn(i: int) -> str:
 
 def _normalise_record(record: dict) -> dict:
     """
-    Mutate-and-return a conversation record so that its conversation block
-    has a flat `turns` list with each turn dict carrying `speaker` and `text`
-    in addition to whatever flags it already had.
+    Mutate-and-return a conversation record so that:
+    1. The conversation block has a flat `turns` list with each turn dict
+       carrying `speaker` and `text` in addition to whatever flags it had.
+    2. `prompt_template_key` is accessible at the record top level (the
+       generation pipeline writes it inside `selection`, but the UI code
+       reads it at the top level).
+    3. `selection` has both the suffix-less forms (`scenario`, `caller`, ...)
+       written by the generator AND the `_key`-suffixed forms (`scenario_key`,
+       `caller_key`, ...) the UI uses for filtering.
     """
+    # --- (2) Promote prompt_template_key from selection to top level
+    sel = record.get("selection") or {}
+    if "prompt_template_key" not in record and "prompt_template_key" in sel:
+        record["prompt_template_key"] = sel["prompt_template_key"]
+
+    # --- (3) [removed] We previously aliased un-suffixed selection fields to
+    # _key-suffixed forms, but the actual records store the rendered textual
+    # description in selection['scenario'] etc., not the dim key. Filtering
+    # logic now does dim-value reverse-lookup at filter time instead.
+
+    # --- (1) Normalise the conversation turn structure
     conv = record.get("conversation")
     if not isinstance(conv, dict):
         return record
@@ -231,12 +248,10 @@ def load_conversations() -> list[dict[str, Any]]:
     return records
 
 
-def _load_broken_conversation_ids() -> set[str]:
+def _scan_detection_xlsx_paths() -> list[Path]:
     """
-    Scan all detection_metadata xlsx files for the `detection_status` column
-    and return the set of conversation_ids whose status is anything other
-    than 'success' (e.g., 'partial', 'error'). Used by load_conversations to
-    suppress incomplete-detection conversations from static mode.
+    Find all detection_metadata xlsx files. Skips Excel lock files (~$...)
+    which appear when a workbook is open in Excel and aren't readable.
     """
     p = config.DETECTION_METADATA_PATH
     candidates: list[Path] = []
@@ -252,39 +267,82 @@ def _load_broken_conversation_ids() -> set[str]:
                     candidates.append(sib)
     elif p.parent.exists() and p.parent.is_dir():
         candidates.extend(p.parent.glob("*detection_metadata.xlsx"))
+    # Drop Excel lock files like ~$something.xlsx
+    return [c for c in candidates if not c.name.startswith("~$")]
 
+
+def _load_broken_conversation_ids() -> set[str]:
+    """
+    Scan all detection_metadata xlsx files for the `detection_status` column
+    and return the set of conversation request_ids whose status is anything
+    other than 'success' (e.g., 'partial', 'error'). Used by
+    load_conversations to suppress incomplete-detection conversations from
+    static mode.
+
+    Prints diagnostic info to stdout so it's clear what was scanned and why
+    a particular result was reached.
+    """
+    p = config.DETECTION_METADATA_PATH
+    candidates = _scan_detection_xlsx_paths()
+
+    print(f"[detection-status] configured DETECTION_METADATA_PATH = {p}  "
+          f"(exists={p.exists()})")
     if not candidates:
+        print(f"[detection-status] no *detection_metadata.xlsx files found "
+              f"in {p if p.is_dir() else p.parent} — broken-conversation filter is a no-op")
         return set()
+    print(f"[detection-status] scanning {len(candidates)} file(s):")
+    for c in candidates:
+        print(f"[detection-status]   - {c}")
 
     from openpyxl import load_workbook  # noqa: PLC0415
 
     bad_ids: set[str] = set()
+    total_rows = 0
+    total_status_counts: dict[str, int] = {}
     for path in candidates:
         try:
             wb = load_workbook(path, read_only=True, data_only=True)
-        except Exception:
+        except Exception as e:
+            print(f"[detection-status]   ERROR loading {path}: {e}")
             continue
         ws = wb.active
         rows = ws.iter_rows(values_only=True)
         try:
             header = next(rows)
         except StopIteration:
+            print(f"[detection-status]   {path.name}: empty (no header row)")
             wb.close()
             continue
         idx = {name: i for i, name in enumerate(header) if name}
-        if "conversation_id" not in idx or "detection_status" not in idx:
+        # Accept either 'request_id' (the actual column name in the project)
+        # or 'conversation_id' (the older naming I'd assumed).
+        id_col = "request_id" if "request_id" in idx else (
+            "conversation_id" if "conversation_id" in idx else None
+        )
+        if id_col is None or "detection_status" not in idx:
+            print(f"[detection-status]   {path.name}: missing required column "
+                  f"(id_col_found={id_col}, "
+                  f"detection_status={'detection_status' in idx}). "
+                  f"Headers seen: {list(idx.keys())[:8]}...")
             wb.close()
             continue
-        cid_i = idx["conversation_id"]
+        cid_i = idx[id_col]
         status_i = idx["detection_status"]
         for row in rows:
             cid = row[cid_i]
             status = row[status_i]
             if cid in (None, ""):
                 continue
-            if status is None or str(status).strip().lower() != "success":
+            total_rows += 1
+            status_str = str(status).strip().lower() if status is not None else "(null)"
+            total_status_counts[status_str] = total_status_counts.get(status_str, 0) + 1
+            if status_str != "success":
                 bad_ids.add(str(cid))
         wb.close()
+    print(f"[detection-status] total rows scanned: {total_rows}")
+    print(f"[detection-status] status counts: {total_status_counts}")
+    print(f"[detection-status] dropping {len(bad_ids)} conversation(s)")
     return bad_ids
 
 
@@ -316,26 +374,7 @@ def load_detection_results(conversation_id: str) -> dict[int, dict[str, Any]] | 
     Turns where every detector logged null are omitted from the outer dict.
     Returns None if no detection metadata file exists for either label.
     """
-    candidates: list[Path] = []
-    p = config.DETECTION_METADATA_PATH
-    if p.exists():
-        if p.is_dir():
-            for name in ("threat_detection_metadata.xlsx",
-                         "benign_detection_metadata.xlsx",
-                         "detection_metadata.xlsx"):
-                f = p / name
-                if f.exists():
-                    candidates.append(f)
-        else:
-            candidates.append(p)
-            for sib_name in ("threat_detection_metadata.xlsx",
-                             "benign_detection_metadata.xlsx"):
-                sib = p.with_name(sib_name)
-                if sib.exists() and sib != p:
-                    candidates.append(sib)
-    elif p.parent.exists() and p.parent.is_dir():
-        for f in p.parent.glob("*detection_metadata.xlsx"):
-            candidates.append(f)
+    candidates = _scan_detection_xlsx_paths()
 
     if not candidates:
         return None
@@ -360,12 +399,15 @@ def load_detection_results(conversation_id: str) -> dict[int, dict[str, Any]] | 
             wb.close()
             continue
         idx = {name: i for i, name in enumerate(header) if name}
-        if "conversation_id" not in idx:
+        id_col = "request_id" if "request_id" in idx else (
+            "conversation_id" if "conversation_id" in idx else None
+        )
+        if id_col is None:
             wb.close()
             continue
         match = None
         for row in rows:
-            if row[idx["conversation_id"]] == conversation_id:
+            if row[idx[id_col]] == conversation_id:
                 match = row
                 break
         wb.close()
@@ -409,44 +451,36 @@ def load_detection_results(conversation_id: str) -> dict[int, dict[str, Any]] | 
     return None
 
 
-def index_stance_detections() -> dict[str, set[str]]:
+def index_stance_detections() -> dict[str, dict[str, set[str]]]:
     """
     Read every detection_metadata xlsx file and return a mapping of
-        conversation_id -> set of stance keys where at least one turn's
-        prediction was "Y" (or "S") for any objective.
+        request_id -> {objective: set_of_stance_keys_with_at_least_one_Y_or_S}
 
     Conversations with no detection rows are simply absent from the result.
-    Used by the static-mode UI to filter conversations by stance.
+    Used by the static-mode UI to filter conversations by stance per task
+    (policy_violation or social_engineering).
     """
-    candidates: list[Path] = []
+    candidates = _scan_detection_xlsx_paths()
     p = config.DETECTION_METADATA_PATH
-    if p.exists():
-        if p.is_dir():
-            for f in p.glob("*detection_metadata.xlsx"):
-                candidates.append(f)
-        else:
-            candidates.append(p)
-            for sib_name in ("threat_detection_metadata.xlsx",
-                             "benign_detection_metadata.xlsx"):
-                sib = p.with_name(sib_name)
-                if sib.exists() and sib != p:
-                    candidates.append(sib)
-    elif p.parent.exists() and p.parent.is_dir():
-        for f in p.parent.glob("*detection_metadata.xlsx"):
-            candidates.append(f)
 
     if not candidates:
+        print(f"[stance-index] no *detection_metadata.xlsx files found "
+              f"under {p if p.is_dir() else p.parent}")
         return {}
+    print(f"[stance-index] scanning {len(candidates)} file(s):")
+    for c in candidates:
+        print(f"[stance-index]   - {c}")
 
     from openpyxl import load_workbook  # noqa: PLC0415
 
     objectives = ("policy_violation", "social_engineering")
 
-    out: dict[str, set[str]] = {}
+    out: dict[str, dict[str, set[str]]] = {}
     for path in candidates:
         try:
             wb = load_workbook(path, read_only=True, data_only=True)
-        except Exception:
+        except Exception as e:
+            print(f"[stance-index]   ERROR loading {path}: {e}")
             continue
         ws = wb.active
         rows = ws.iter_rows(values_only=True)
@@ -456,7 +490,12 @@ def index_stance_detections() -> dict[str, set[str]]:
             wb.close()
             continue
         idx = {name: i for i, name in enumerate(header) if name}
-        if "conversation_id" not in idx:
+        id_col = "request_id" if "request_id" in idx else (
+            "conversation_id" if "conversation_id" in idx else None
+        )
+        if id_col is None:
+            print(f"[stance-index]   {path.name}: no 'request_id' or "
+                  f"'conversation_id' column. Headers: {list(idx.keys())[:8]}...")
             wb.close()
             continue
 
@@ -473,12 +512,15 @@ def index_stance_detections() -> dict[str, set[str]]:
                     stance = base[len(obj) + 2:]
                     pred_columns.append((obj, stance, col_idx))
                     break
+        print(f"[stance-index]   {path.name}: {len(pred_columns)} prediction column(s) found")
 
+        rows_with_hits = 0
         for row in rows:
-            cid = row[idx["conversation_id"]]
+            cid = row[idx[id_col]]
             if cid in (None, ""):
                 continue
-            for _obj, stance, ci in pred_columns:
+            had_hit = False
+            for obj, stance, ci in pred_columns:
                 cell = row[ci]
                 if cell in (None, ""):
                     continue
@@ -489,7 +531,11 @@ def index_stance_detections() -> dict[str, set[str]]:
                 if not isinstance(preds, list):
                     continue
                 if any(p in ("Y", "S") for p in preds):
-                    out.setdefault(str(cid), set()).add(stance)
+                    out.setdefault(str(cid), {}).setdefault(obj, set()).add(stance)
+                    had_hit = True
+            if had_hit:
+                rows_with_hits += 1
+        print(f"[stance-index]   {path.name}: {rows_with_hits} row(s) with at least one Y/S")
         wb.close()
 
     return out
