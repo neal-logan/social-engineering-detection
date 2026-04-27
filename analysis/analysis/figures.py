@@ -68,14 +68,25 @@ COLOR_NEUTRAL = UNCC_GREY          # neutral / "before"
 COLOR_HIGHLIGHT = UNCC_GREEN_BRIGHT # highlighted / "after"
 COLOR_DIVIDER = UNCC_BLACK         # axis lines, dividers
 
-# Sequential colormap for heatmaps: white -> Charlotte Green
+# Heatmap colormaps. Both are tuned so that even the most saturated end
+# of the gradient stays light enough that black cell-text reads cleanly.
+# This is more important for legibility than maximum dynamic range; if
+# you need a high-contrast variant for a specific plot, pass `cmap=` to
+# heatmap_from_dataframe explicitly.
 import matplotlib.colors as _mcolors
+
+# Sequential: pale cream → Niner Gold (warm, monotone, never goes dark)
 UNCC_GREEN_CMAP = _mcolors.LinearSegmentedColormap.from_list(
-    "uncc_green", ["#FFFFFF", UNCC_GREEN_DARK]
+    "uncc_sequential",
+    ["#FFFDF5", "#F4ECD2", "#E5D7A1", "#C9B777", UNCC_GOLD],
 )
-# Diverging colormap for AUC (centered at 0.5): gold -> white -> green
+
+# Diverging: muted gold ← cream → muted Charlotte Green. Both poles are
+# tinted but light; the midpoint is near-white so the direction of
+# departure from 0.5 is obvious without forcing dark text on dark cells.
 UNCC_DIVERGING_CMAP = _mcolors.LinearSegmentedColormap.from_list(
-    "uncc_diverging", [UNCC_GOLD_BRIGHT, "#FFFFFF", UNCC_GREEN_DARK]
+    "uncc_diverging",
+    [UNCC_GOLD_BRIGHT, "#F0E5C4", "#FFFDF5", "#C9DDD0", "#5C9479"],
 )
 
 
@@ -95,6 +106,57 @@ def set_output_dir(path: str | Path) -> None:
 
 def get_output_dir() -> Path:
     return _OUTPUT_DIR
+
+
+# ---------------------------------------------------------------------------
+# Title / label helpers — translate internal variable names into plain English
+# ---------------------------------------------------------------------------
+
+_OBJECTIVE_TITLES = {
+    "social_engineering": "social engineering attack",
+    "policy_violation":   "policy violation",
+    "combined":           "combined SE-or-PV",
+}
+
+_SCENARIO_TITLES = {
+    "se_detection":  "Social engineering attack detection",
+    "se_prevention": "Social engineering attack prevention",
+    "pv_detection":  "Policy violation detection",
+    "pv_on_time":    "Policy violation on-time prediction",
+}
+
+_STANCE_TITLES = {
+    "high_precision": "high-precision",
+    "balanced":       "balanced",
+    "high_recall":    "high-recall",
+}
+
+_FILTER_TITLES = {
+    "threat":  "threat conversations",
+    "benign":  "benign conversations",
+    None:      "all conversations",
+}
+
+
+def _pretty_objective(obj: str) -> str:
+    return _OBJECTIVE_TITLES.get(obj, obj.replace("_", " "))
+
+
+def _pretty_scenario(scen: str) -> str:
+    return _SCENARIO_TITLES.get(scen, scen.replace("_", " "))
+
+
+def _pretty_stance(stance: str) -> str:
+    return _STANCE_TITLES.get(stance, stance.replace("_", " "))
+
+
+def _pretty_filter(f: Optional[str]) -> str:
+    return _FILTER_TITLES.get(f, str(f))
+
+
+def _pretty_violation(v: str) -> str:
+    """improper_authentication -> 'Improper authentication'."""
+    return v.replace("_", " ").capitalize()
 
 
 # ---------------------------------------------------------------------------
@@ -170,10 +232,15 @@ def hist_first_violation_turn_by_type(
             max_t = int(np.max(vals))
             bins = np.arange(0, max_t + 2) - 0.5
             ax.hist(vals, bins=bins, color=COLOR_PRIMARY, edgecolor="white")
-        ax.set_title(f"{vtype}\n({n_with} with, {n_without} without)")
+        ax.set_title(
+            f"{_pretty_violation(vtype)}\n({n_with} with, {n_without} without)"
+        )
         ax.set_xlabel("Turn index")
         ax.set_ylabel("Conversations")
-    fig.suptitle(f"Turn of first policy violation by type{title_suffix}")
+    fig.suptitle(
+        f"Turn of first policy violation by violation type — "
+        f"{_pretty_filter(conversation_filter)}"
+    )
     fig.tight_layout()
     suffix = "" if conversation_filter is None else f"__{conversation_filter}"
     save_figure(name + suffix, fig)
@@ -201,17 +268,29 @@ def hist_violations_by_type_x_representative(
         df = conv_df
         title_suffix = " (combined)"
 
-    if "representative" not in df.columns:
+    # Prefer the short-label column built by preliminaries; fall back
+    # to the raw prompt-text column with the substring-match labeler.
+    if "short_representative" in df.columns:
+        rep_col = "short_representative"
+    elif "representative" in df.columns:
+        df = df.copy()
+        df["__rep_short"] = df["representative"].apply(S.representative_short_label)
+        rep_col = "__rep_short"
+    else:
         raise ValueError(
-            "build_conversation_table is missing 'representative'; "
-            "cannot break violations down by representative type."
+            "build_conversation_table is missing both 'short_representative' "
+            "and 'representative'; cannot break violations down by representative."
         )
 
-    # Counts per (representative, violation_type)
-    rep_values = sorted(df["representative"].dropna().unique().tolist(), key=str)
+    rep_values = list(df[rep_col].dropna().unique())
+    # Use canonical order if all observed values are in the canonical list;
+    # otherwise sort alphabetically as a fallback so plots remain stable.
+    canonical_order = [r for r in S.REPRESENTATIVE_SHORT_LABELS if r in rep_values]
+    extras = sorted([r for r in rep_values if r not in canonical_order], key=str)
+    rep_values = canonical_order + extras
     table_rows = []
     for rep in rep_values:
-        sub = df[df["representative"] == rep]
+        sub = df[df[rep_col] == rep]
         n_conv = len(sub)
         for v in S.POLICY_VIOLATION_TYPES:
             table_rows.append({
@@ -241,7 +320,7 @@ def hist_violations_by_type_x_representative(
         ax.bar(x, sub["total_count"], color=COLOR_PRIMARY, edgecolor="white")
         ax.set_xticks(x)
         ax.set_xticklabels(rep_values, rotation=20, ha="right", fontsize=8)
-        ax.set_title(vtype.replace("improper_", ""))
+        ax.set_title(_pretty_violation(vtype))
         ax.set_ylabel("Total violations")
         # Annotate each bar with count + mean per conversation
         for i, rep in enumerate(rep_values):
@@ -253,7 +332,9 @@ def hist_violations_by_type_x_representative(
                 xy=(i, tot), xytext=(0, 3), textcoords="offset points",
                 ha="center", va="bottom", fontsize=7, color=UNCC_BLACK,
             )
-    fig.suptitle(f"Policy violations by type × representative{title_suffix}")
+    fig.suptitle(
+        f"Policy violations by type and representative behavior{title_suffix}"
+    )
     fig.tight_layout()
     save_figure(name + suffix, fig)
     return fig
@@ -291,12 +372,15 @@ def hist_first_prediction_turn_by_stance(
             max_t = int(np.max(vals))
             bins = np.arange(0, max_t + 2) - 0.5
             ax.hist(vals, bins=bins, color=COLOR_SECONDARY, edgecolor="white")
-        ax.set_title(f"{stance}\n({n_with} fired, {n_without} never)")
+        ax.set_title(
+            f"{_pretty_stance(stance).capitalize()}\n"
+            f"({n_with} fired, {n_without} never)"
+        )
         ax.set_xlabel("Turn index")
         ax.set_ylabel("Conversations")
     fig.suptitle(
-        f"Turn of first {objective.replace('_', ' ')} prediction"
-        f"{title_suffix}"
+        f"Turn of first {_pretty_objective(objective)} prediction — "
+        f"{_pretty_filter(conversation_filter)}"
     )
     fig.tight_layout()
 
@@ -308,31 +392,35 @@ def hist_first_prediction_turn_by_stance(
     return fig
 
 
-def hist_pred_minus_violation_diff(
+def hist_violation_minus_pred_diff(
     conv_df: pd.DataFrame,
     *,
     objective: str,    # "social_engineering" | "policy_violation" | "combined"
     conversation_filter: Optional[str] = None,
     name: Optional[str] = None,
 ) -> plt.Figure:
-    """For each stance: histogram of (first_prediction_turn − first_violation_turn_any).
+    """For each stance: histogram of (first_violation_turn − first_prediction_turn).
+
+    Positive values (right of zero) mean the prediction came BEFORE the
+    first actual violation — these are conversations the system would
+    have prevented. Negative values (left of zero) mean the prediction
+    came AFTER the first actual violation — those are misses. Zero means
+    the prediction landed on the same turn as the first violation.
 
     NaN diffs (no first prediction OR no actual violation) are excluded
     from the histogram; their counts are shown in the panel title.
     """
     if conversation_filter is not None:
         df = conv_df[conv_df["conversation_type"] == conversation_filter]
-        title_suffix = f" ({conversation_filter})"
     else:
         df = conv_df
-        title_suffix = " (combined)"
 
     fig, axes = plt.subplots(
         1, len(S.STANCES),
         figsize=(4 * len(S.STANCES), 3.2), sharey=True,
     )
     for ax, stance in zip(axes, S.STANCES):
-        col = f"first_pred_minus_first_violation__{objective}__{stance}"
+        col = f"first_violation_minus_first_pred__{objective}__{stance}"
         vals = df[col].dropna().to_numpy()
         n_excl = int(df[col].isna().sum())
         if vals.size > 0:
@@ -340,18 +428,20 @@ def hist_pred_minus_violation_diff(
             hi = int(np.ceil(vals.max()))
             bins = np.arange(lo, hi + 2) - 0.5
             ax.hist(vals, bins=bins, color=COLOR_HIGHLIGHT, edgecolor="white")
-            ax.axvline(0, color="black", linestyle="--", linewidth=1)
-        ax.set_title(f"{stance}\n(N={vals.size}, excl={n_excl})")
-        ax.set_xlabel("Pred turn − violation turn")
+            ax.axvline(0, color=UNCC_BLACK, linestyle="--", linewidth=1)
+        ax.set_title(
+            f"{_pretty_stance(stance).capitalize()}\n(N={vals.size}, excluded={n_excl})"
+        )
+        ax.set_xlabel("First violation turn − first prediction turn\n← missed       prevented →")
         ax.set_ylabel("Conversations")
     fig.suptitle(
-        f"First {objective.replace('_', ' ')} prediction relative to first "
-        f"actual violation{title_suffix}"
+        f"First actual violation relative to first {_pretty_objective(objective)} "
+        f"prediction — {_pretty_filter(conversation_filter)}"
     )
     fig.tight_layout()
 
     out_name = name or (
-        f"hist_pred_minus_violation__{objective}"
+        f"hist_violation_minus_pred__{objective}"
         + ("" if conversation_filter is None else f"__{conversation_filter}")
     )
     save_figure(out_name, fig)
@@ -430,15 +520,15 @@ def hist_violations_pre_at_post(
                bottom=post_bottom, label="post", color=COLOR_PRIMARY)
         ax.set_xticks(x)
         ax.set_xticklabels(
-            [v.replace("improper_", "") for v in sub.index],
+            [_pretty_violation(v) for v in sub.index],
             rotation=20, ha="right",
         )
-        ax.set_title(stance)
+        ax.set_title(_pretty_stance(stance).capitalize())
         ax.set_ylabel("Mean violations per conversation")
         ax.legend(loc="upper right", fontsize=8)
     fig.suptitle(
-        f"Actual violations relative to first {objective.replace('_', ' ')} "
-        f"prediction (mean per conversation){title_suffix}"
+        f"Actual violations relative to first {_pretty_objective(objective)} "
+        f"prediction (mean per conversation) — {_pretty_filter(conversation_filter)}"
     )
     fig.tight_layout()
 
@@ -480,13 +570,9 @@ def heatmap_from_dataframe(
     ax.set_yticklabels(df.index)
     ax.set_title(title)
     fig.colorbar(im, ax=ax, shrink=0.8)
-    # Threshold for cell label color: pick midpoint of value range so
-    # dark cells get white text and light cells get dark text.
-    if np.any(~np.isnan(arr)):
-        lo, hi = float(np.nanmin(arr)), float(np.nanmax(arr))
-        threshold = lo + 0.55 * (hi - lo)
-    else:
-        threshold = 0.0
+    # Both UNCC_GREEN_CMAP and UNCC_DIVERGING_CMAP stay light enough at
+    # all gradient stops that black text is legible everywhere, so we
+    # use uniform black rather than thresholded white/black.
     for i in range(arr.shape[0]):
         for j in range(arr.shape[1]):
             v = arr[i, j]
@@ -495,7 +581,7 @@ def heatmap_from_dataframe(
             ax.text(
                 j, i, fmt.format(v),
                 ha="center", va="center",
-                color="white" if v >= threshold else UNCC_BLACK,
+                color=UNCC_BLACK,
                 fontsize=8,
             )
     fig.tight_layout()
@@ -607,15 +693,14 @@ def plot_roc_curves(
     *,
     title: str,
     name: str,
-    annotate_stances: bool = True,
     close: bool = False,
 ) -> plt.Figure:
     """Plot one or more ROC curves on a single set of axes.
 
-    Each `ROCResult` from `analysis.roc` becomes one curve. Operating
-    points (the three stances) are scattered on top of the curve. AUC
-    values are added to the legend label. Saves PNG + SVG; also saves a
-    CSV with all (slice, stance, fpr, tpr, auc) rows.
+    Each `ROCResult` from `analysis.roc` becomes one curve. Markers at
+    each operating point (the three stances) are drawn on the curve.
+    AUC and sample sizes are reported in the legend. Saves PNG + SVG
+    plus an xlsx with all (slice, stance, fpr, tpr, auc) rows.
     """
     fig, ax = plt.subplots(figsize=(5.5, 5))
     ax.plot([0, 1], [0, 1], color=COLOR_NEUTRAL, linestyle=":", linewidth=1)
@@ -631,17 +716,6 @@ def plot_roc_curves(
         )
         ax.plot(r.roc_x, r.roc_y, marker="o", color=color,
                 label=label, linewidth=1.5)
-        if annotate_stances:
-            for op in r.operating_points:
-                if not (np.isnan(op.fpr) or np.isnan(op.tpr)):
-                    ax.annotate(
-                        op.stance.replace("high_precision", "HP")
-                                 .replace("balanced", "B")
-                                 .replace("high_recall", "HR"),
-                        xy=(op.fpr, op.tpr),
-                        xytext=(4, 4), textcoords="offset points",
-                        fontsize=7, color=color,
-                    )
         for op in r.operating_points:
             csv_rows.append({
                 "scenario": r.scenario,
@@ -659,7 +733,10 @@ def plot_roc_curves(
     ax.set_ylabel("True positive rate")
     ax.set_title(title)
     ax.legend(loc="lower right", fontsize=7, framealpha=0.9)
-    ax.grid(True, alpha=0.25)
+    # Remove grid and the top/right spines for a cleaner look
+    ax.grid(False)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
     fig.tight_layout()
 
     save_figure(name, fig, close=close)

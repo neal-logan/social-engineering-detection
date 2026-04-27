@@ -311,21 +311,85 @@ def compute_roc_by_slice(
     scenario: str,
     slice_column: str,
 ) -> list[ROCResult]:
-    """One ROC per unique value of `slice_column` (e.g. cialdini_emphasis,
-    benign_context).
+    """One ROC per unique value of `slice_column`.
 
-    Slice labels are normalized for display: when slicing by
-    cialdini_emphasis, the label is collapsed to the bare principle name
-    (e.g. "authority") even when the column carries the full prompt text.
+    Accepts short-label columns (`short_cialdini_emphasis`,
+    `short_benign_context`, `short_representative`) directly, or raw
+    prompt-text columns (`cialdini_emphasis`, `benign_context`,
+    `representative`) which are normalized at slice time.
+
+    For Cialdini and benign-context slices, the returned list is
+    ordered to match the canonical ordering from
+    `schema.CIALDINI_PRINCIPLES` /
+    `schema.BENIGN_CONTEXT_SHORT_LABELS` so that figure legends list
+    slices in a predictable order.
     """
-    out: list[ROCResult] = []
+    # Normalize slice labels for display
+    if slice_column in ("cialdini_emphasis", "short_cialdini_emphasis"):
+        normalize = S.cialdini_principle_label
+    elif slice_column in ("benign_context", "short_benign_context"):
+        normalize = S.benign_context_short_label
+    elif slice_column in ("representative", "short_representative"):
+        normalize = S.representative_short_label
+    else:
+        normalize = str
+
+    # Group on the raw column values; collapse to display labels
+    by_label: dict[str, pd.DataFrame] = {}
     for val, grp in conv_df.groupby(slice_column, dropna=False):
-        if slice_column == "cialdini_emphasis":
-            label = S.cialdini_principle_label(val)
+        label = normalize(val)
+        if label in by_label:
+            by_label[label] = pd.concat([by_label[label], grp])
         else:
-            label = str(val)
-        out.append(compute_roc(grp, turn_df, scenario, slice_label=label))
+            by_label[label] = grp
+
+    # Order labels canonically when applicable
+    if slice_column in ("cialdini_emphasis", "short_cialdini_emphasis"):
+        canonical = list(S.CIALDINI_PRINCIPLES)
+    elif slice_column in ("benign_context", "short_benign_context"):
+        canonical = list(S.BENIGN_CONTEXT_SHORT_LABELS)
+    elif slice_column in ("representative", "short_representative"):
+        canonical = list(S.REPRESENTATIVE_SHORT_LABELS)
+    else:
+        canonical = []
+
+    observed = list(by_label.keys())
+    in_canonical = [v for v in canonical if v in observed]
+    extras = sorted([v for v in observed if v not in canonical], key=str)
+    ordered_labels = in_canonical + extras
+
+    out: list[ROCResult] = []
+    for label in ordered_labels:
+        out.append(
+            compute_roc(by_label[label], turn_df, scenario, slice_label=label)
+        )
     return out
+
+
+def _is_cialdini_column(col: str) -> bool:
+    return col in ("cialdini_emphasis", "short_cialdini_emphasis")
+
+
+def _is_benign_context_column(col: str) -> bool:
+    return col in ("benign_context", "short_benign_context")
+
+
+def _canonical_order_for(col: str, observed: list[str]) -> list[str]:
+    """Return `observed` reordered to match the canonical order for `col`.
+
+    Values in the canonical list and present in `observed` come first in
+    canonical order; any extras (unrecognized values) follow,
+    alphabetically sorted, so plots remain stable.
+    """
+    if _is_cialdini_column(col):
+        canonical = list(S.CIALDINI_PRINCIPLES)
+    elif _is_benign_context_column(col):
+        canonical = list(S.BENIGN_CONTEXT_SHORT_LABELS)
+    else:
+        return sorted(observed, key=str)
+    in_canonical = [v for v in canonical if v in observed]
+    extras = sorted([v for v in observed if v not in canonical], key=str)
+    return in_canonical + extras
 
 
 def auc_heatmap_table(
@@ -333,35 +397,68 @@ def auc_heatmap_table(
     turn_df: pd.DataFrame,
     scenario: str,
     *,
-    row_column: str = "benign_context",
-    col_column: str = "cialdini_emphasis",
+    row_column: str = "short_benign_context",
+    col_column: str = "short_cialdini_emphasis",
 ) -> pd.DataFrame:
     """Heatmap-shaped DataFrame: row_column on the index, col_column on the
     columns, AUC values in cells. NaN where the slice has fewer than two
     classes (AUC undefined).
 
-    Row / column labels are normalized when the underlying column is
-    cialdini_emphasis: the prompt text is collapsed to the bare principle
-    name for display purposes. The data is grouped on the original column
-    value (so principles whose prompt text differs but resolves to the
-    same principle name would NOT be collapsed at the data level — that
-    would be a generation-time anomaly worth flagging if seen).
+    Default row/column args refer to the short-label columns built by
+    `preliminaries.build_conversation_table`. If those columns are
+    absent, this function falls back to the raw prompt-text columns
+    (`benign_context`, `cialdini_emphasis`) and normalizes labels at
+    plot time. Pass either set of names explicitly to override.
+
+    When an axis is a Cialdini column, the displayed labels are collapsed
+    to the bare principle name and ordered to match
+    `schema.CIALDINI_PRINCIPLES`. When an axis is a benign-context
+    column, labels are ordered to match
+    `schema.BENIGN_CONTEXT_SHORT_LABELS`.
     """
-    raw_rows = sorted(conv_df[row_column].dropna().unique().tolist(), key=str)
-    raw_cols = sorted(conv_df[col_column].dropna().unique().tolist(), key=str)
-    row_label = (
-        S.cialdini_principle_label if row_column == "cialdini_emphasis" else str
-    )
-    col_label = (
-        S.cialdini_principle_label if col_column == "cialdini_emphasis" else str
-    )
-    display_rows = [row_label(r) for r in raw_rows]
-    display_cols = [col_label(c) for c in raw_cols]
+    # Fall back gracefully if the short_* columns aren't in the frame.
+    if row_column not in conv_df.columns and row_column.startswith("short_"):
+        row_column = row_column.replace("short_", "", 1)
+    if col_column not in conv_df.columns and col_column.startswith("short_"):
+        col_column = col_column.replace("short_", "", 1)
+
+    # Decide on the labeling function for each axis. Short-label columns
+    # already carry clean labels, so we pass them through; raw columns get
+    # normalized.
+    def _labeler(col: str):
+        if col == "cialdini_emphasis":
+            return S.cialdini_principle_label
+        if col == "benign_context":
+            return S.benign_context_short_label
+        return str
+
+    raw_rows = list(conv_df[row_column].dropna().unique())
+    raw_cols = list(conv_df[col_column].dropna().unique())
+    row_label = _labeler(row_column)
+    col_label = _labeler(col_column)
+
+    # Build the raw -> display map then collapse duplicate display
+    # values that map back to the same principle. (Almost never happens
+    # if the upstream pipeline is well-behaved, but harmless.)
+    row_map: dict[object, str] = {r: row_label(r) for r in raw_rows}
+    col_map: dict[object, str] = {c: col_label(c) for c in raw_cols}
+
+    display_rows_observed = list(dict.fromkeys(row_map.values()))
+    display_cols_observed = list(dict.fromkeys(col_map.values()))
+    display_rows = _canonical_order_for(row_column, display_rows_observed)
+    display_cols = _canonical_order_for(col_column, display_cols_observed)
     out = pd.DataFrame(index=display_rows, columns=display_cols, dtype=float)
-    for raw_r, disp_r in zip(raw_rows, display_rows):
-        for raw_c, disp_c in zip(raw_cols, display_cols):
-            sub = conv_df[(conv_df[row_column] == raw_r) &
-                          (conv_df[col_column] == raw_c)]
+
+    # For each (display_r, display_c) combination, slice the data using
+    # all raw values that map to the current display label.
+    for disp_r in display_rows:
+        rows_for_r = [k for k, v in row_map.items() if v == disp_r]
+        for disp_c in display_cols:
+            cols_for_c = [k for k, v in col_map.items() if v == disp_c]
+            sub = conv_df[
+                conv_df[row_column].isin(rows_for_r)
+                & conv_df[col_column].isin(cols_for_c)
+            ]
             if sub.empty:
                 continue
             y_true = _y_true_for_scenario(sub, scenario)

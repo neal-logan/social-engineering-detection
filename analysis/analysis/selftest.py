@@ -150,15 +150,62 @@ def _build_synthetic(tmp: Path, n_threat: int = 30, n_benign: int = 30,
             )
             conv_store["conversations"][rid] = rec
             _, meta_extra = _detector_predictions_for(rec, kind, rng)
+            # Realistic-shaped fixture: representative and benign_context
+            # carry the dimension *key* (mirroring the generator's *_key
+            # columns), while cialdini_emphasis carries a phrase from the
+            # actual prompt to exercise the substring matcher (including
+            # 'commitment and consistency', which uses 'and' rather than
+            # the underscore form).
+            cialdini_phrasing = {
+                "reciprocity":           "this turn emphasizes reciprocity",
+                "commitment_consistency":"this turn emphasizes commitment and consistency",
+                "social_proof":          "this turn emphasizes social proof",
+                "authority":             "this turn emphasizes authority",
+                "liking":                "this turn emphasizes liking",
+                "scarcity":              "this turn emphasizes scarcity",
+                "unity":                 "this turn emphasizes unity",
+            }
+            cialdini_key = rng.choice(list(S.CIALDINI_PRINCIPLES))
+            rep_key = rng.choice(["by_book", "tired", "helpful", "distracted"])
+            ctx_key = rng.choice(["minimal", "moderate", "heavy"])
+
+            # Three different paths exercised for the three dimensions:
+            #   - cialdini_emphasis: rendered prompt + metadata *_key column (path 1)
+            #   - benign_context:    rendered prompt + selection.{name}_key in JSON (path 2)
+            #   - representative:    rendered prompt only; substring fallback (path 3)
+            rep_phrasing = {
+                "by_book":    "the representative follows policy by-the-book and is strict about procedure",
+                "tired":      "the representative is tired and exhausted at the end of shift",
+                "helpful":    "the representative is helpful and eager to help the caller",
+                "distracted": "the representative is distracted and rushed by other duties",
+            }
+            ctx_phrasing = {
+                "minimal":  "minimal benign context throughout this conversation",
+                "moderate": "moderate amount of benign small-talk surrounding the call",
+                "heavy":    "heavy benign chat about weather and weekend plans",
+            }
+
+            # Inject the selection keys into the conversation record so the
+            # preliminaries lookup chain can find them
+            scenario_key = rng.choice(["credit_union", "brokerage", "health_ins"])
+            rec["selection"] = {
+                "scenario_key":          scenario_key,
+                "representative_key":    rep_key,
+                "caller_key":            rng.choice(["a", "b", "c"]),
+                "benign_context_key":    ctx_key,
+                "cialdini_emphasis_key": cialdini_key,
+                "turn_count_key":        "standard",
+            }
             row = {
                 "request_id": rid,
                 "replicate_index": 0,
                 "prompt_template_key": kind,
-                "scenario": rng.choice(["credit_union", "brokerage", "health_ins"]),
-                "representative": rng.choice(["by_book", "tired", "helpful", "distracted"]),
+                "scenario": scenario_key,
+                "representative": rep_phrasing[rep_key],
                 "caller": rng.choice(["a", "b", "c"]),
-                "benign_context": rng.choice(["minimal", "moderate", "heavy"]),
-                "cialdini_emphasis": rng.choice(list(S.CIALDINI_PRINCIPLES)),
+                "benign_context": ctx_phrasing[ctx_key],
+                "cialdini_emphasis": cialdini_phrasing[cialdini_key],
+                "cialdini_emphasis_key": cialdini_key,
                 "turn_count_value": n_turns,
                 "flavor": "x",
                 "generation_model": "gpt-5.4",
@@ -235,6 +282,39 @@ def main() -> int:
         print(f"  turn table: {len(combined_turns)} rows, "
               f"{len(combined_turns.columns)} cols")
 
+        # ---- Short-label column sanity
+        assert "short_cialdini_emphasis" in combined.columns, (
+            "build_conversation_table did not produce short_cialdini_emphasis"
+        )
+        # Every row's short label must be one of the canonical principles
+        # (since the fixture sets the cialdini_emphasis_key column directly).
+        unexpected_cialdini = (
+            set(combined["short_cialdini_emphasis"]) - set(S.CIALDINI_PRINCIPLES)
+        )
+        assert not unexpected_cialdini, (
+            f"short_cialdini_emphasis has non-canonical values: "
+            f"{unexpected_cialdini}"
+        )
+        # short_representative and short_benign_context: substring fallback
+        # (since the fixture doesn't supply *_key for these, we exercise the
+        # heuristic path)
+        if "short_representative" in combined.columns:
+            unexpected_rep = (
+                set(combined["short_representative"])
+                - set(S.REPRESENTATIVE_SHORT_LABELS)
+            )
+            assert not unexpected_rep, (
+                f"short_representative has non-canonical values: {unexpected_rep}"
+            )
+        if "short_benign_context" in combined.columns:
+            unexpected_ctx = (
+                set(combined["short_benign_context"])
+                - set(S.BENIGN_CONTEXT_SHORT_LABELS)
+            )
+            assert not unexpected_ctx, (
+                f"short_benign_context has non-canonical values: {unexpected_ctx}"
+            )
+
         # ---- Sanity checks on derived columns
         # running_total_* lists must be length n_turns and monotone non-decreasing
         for _, row in combined.iterrows():
@@ -299,9 +379,9 @@ def main() -> int:
         figures.hist_first_prediction_turn_by_stance(
             combined, objective="policy_violation", conversation_filter="benign")
 
-        figures.hist_pred_minus_violation_diff(
+        figures.hist_violation_minus_pred_diff(
             combined, objective="social_engineering", conversation_filter="threat")
-        figures.hist_pred_minus_violation_diff(
+        figures.hist_violation_minus_pred_diff(
             combined, objective="policy_violation", conversation_filter="threat")
 
         figures.hist_violations_pre_at_post(
@@ -315,20 +395,33 @@ def main() -> int:
         figures.hist_violations_by_type_x_representative(
             combined, conversation_filter="benign")
 
-        # Heatmap: prompted Cialdini emphasis x Cialdini signals actually present
+        # Heatmap: prompted Cialdini emphasis x Cialdini signals actually present.
+        # Canonical Cialdini ordering on both axes.
         threat_only = combined[combined["conversation_type"] == "threat"]
+        emphasis_col = (
+            "short_cialdini_emphasis"
+            if "short_cialdini_emphasis" in threat_only.columns
+            else "cialdini_emphasis"
+        )
         emphasis_label = (
-            threat_only["cialdini_emphasis"]
-            .apply(S.cialdini_principle_label)
+            threat_only[emphasis_col]
+            if emphasis_col == "short_cialdini_emphasis"
+            else threat_only[emphasis_col].apply(S.cialdini_principle_label)
         )
         actual = threat_only.groupby(emphasis_label)[
             [f"total_cialdini_{p}" for p in S.CIALDINI_PRINCIPLES]
         ].mean()
         actual.columns = [c.replace("total_cialdini_", "") for c in actual.columns]
+        # Canonical ordering on rows
+        observed_rows = list(actual.index)
+        in_canonical = [p for p in S.CIALDINI_PRINCIPLES if p in observed_rows]
+        extras = sorted([r for r in observed_rows if r not in in_canonical], key=str)
+        actual = actual.reindex(in_canonical + extras)
+        # Columns are already in canonical order from list comprehension above
         actual.index.name = "prompted_emphasis"
         figures.heatmap_from_dataframe(
             actual,
-            title="Mean signals by principle (rows = prompted emphasis), threat only",
+            title="Mean Cialdini signals by principle, by prompted emphasis (threat only)",
             name="heatmap_prompted_x_actual_cialdini",
             fmt="{:.2f}",
         )
@@ -337,19 +430,6 @@ def main() -> int:
         for scen in roc.SCENARIOS:
             cm = query.confusion_for_scenario(ctx, scen, stance="balanced")
             figures.save_table(f"confusion_for_scenario__{scen}__balanced", cm)
-        # Heatmap example: cialdini emphasis x violation type, threat conversations
-        threat_only = combined[combined["conversation_type"] == "threat"]
-        heat_df = (
-            threat_only.groupby("cialdini_emphasis")[
-                [f"total_{v}" for v in S.POLICY_VIOLATION_TYPES]
-            ].mean()
-        )
-        heat_df.columns = [c.replace("total_", "") for c in heat_df.columns]
-        figures.heatmap_from_dataframe(
-            heat_df,
-            title="Mean violations per conversation, threat only",
-            name="heatmap_emphasis_x_violation",
-        )
 
         # Sankey
         try:

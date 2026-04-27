@@ -203,14 +203,17 @@ def _derive_one_conversation(
         first_pred_turn = _first_index_or_nan(binary)
         out[f"first_prediction_turn__{key}"] = first_pred_turn
 
-        # Difference column: first prediction - first actual policy violation
+        # Difference column: first actual violation - first prediction.
+        # Negative => prediction came AFTER actual violation (we missed it).
+        # Zero    => prediction landed on the same turn as actual violation.
+        # Positive => prediction came BEFORE actual violation (we prevented it).
         # NaN whenever either is missing.
         first_v = out["first_violation_turn__any"]
         if np.isnan(first_pred_turn) or np.isnan(first_v):
             diff = np.nan
         else:
-            diff = first_pred_turn - first_v
-        out[f"first_pred_minus_first_violation__{key}"] = diff
+            diff = first_v - first_pred_turn
+        out[f"first_violation_minus_first_pred__{key}"] = diff
 
         # Pre / at / post counts of actual policy violations relative to
         # the first prediction by this detector. One set of (pre, at,
@@ -276,8 +279,8 @@ def _derive_one_conversation(
         if np.isnan(combined) or np.isnan(first_v_any):
             diff = np.nan
         else:
-            diff = combined - first_v_any
-        out[f"first_pred_minus_first_violation__combined__{stance}"] = diff
+            diff = first_v_any - combined
+        out[f"first_violation_minus_first_pred__combined__{stance}"] = diff
 
     # ------------------------------------------------------------------
     # Stance concordance per objective: of eligible turns, in how many
@@ -321,6 +324,93 @@ def build_conversation_table(loaded: LoadedDataset) -> pd.DataFrame:
 
     derived_df = pd.DataFrame(derived_rows)
     out = pd.concat([base.reset_index(drop=True), derived_df], axis=1)
+
+    # Short-label columns. Sources, in order of preference:
+    #   1. The `*_key` companion column on the metadata DataFrame, if present.
+    #   2. The `selection.{name}_key` field on each conversation JSON record,
+    #      if present (the generator writes these).
+    #   3. Substring match against the alias maps in `schema.py`.
+    #
+    # Downstream code should group/plot on the `short_*` columns, not the
+    # raw prompt-text columns.
+
+    def _key_from_selection(rid: str, key_field: str) -> object:
+        rec = loaded.conversations.get(rid, {})
+        sel = rec.get("selection") if isinstance(rec, dict) else None
+        if isinstance(sel, dict):
+            v = sel.get(key_field)
+            if v is not None and str(v).strip():
+                return v
+        return None
+
+    def _short_column(value_col: str, key_col: str, key_field: str, normalizer):
+        out_vals: list[str] = []
+        rids = out["request_id"].astype(str).tolist()
+        meta_keys = (
+            out[key_col].tolist() if key_col in out.columns
+            else [None] * len(out)
+        )
+        prompt_vals = (
+            out[value_col].tolist() if value_col in out.columns
+            else [None] * len(out)
+        )
+        for rid, mk, pv in zip(rids, meta_keys, prompt_vals):
+            # 1. metadata key column
+            if mk is not None and pd.notna(mk) and str(mk).strip():
+                out_vals.append(str(mk).strip())
+                continue
+            # 2. conversation JSON selection.{name}_key
+            sk = _key_from_selection(rid, key_field)
+            if sk is not None:
+                out_vals.append(str(sk).strip())
+                continue
+            # 3. substring fallback against alias maps
+            out_vals.append(normalizer(pv))
+        return out_vals
+
+    short_specs = [
+        ("representative",    "representative_key",    "representative_key",
+         S.representative_short_label,   "short_representative",
+         set(S.REPRESENTATIVE_SHORT_LABELS)),
+        ("benign_context",    "benign_context_key",    "benign_context_key",
+         S.benign_context_short_label,   "short_benign_context",
+         set(S.BENIGN_CONTEXT_SHORT_LABELS)),
+        ("cialdini_emphasis", "cialdini_emphasis_key", "cialdini_emphasis_key",
+         S.cialdini_principle_label,     "short_cialdini_emphasis",
+         set(S.CIALDINI_PRINCIPLES)),
+    ]
+    unrecognized: dict[str, set[str]] = {}
+    for (value_col, key_col, key_field, normalizer, target,
+         canonical_set) in short_specs:
+        col_data = _short_column(value_col, key_col, key_field, normalizer)
+        out[target] = col_data
+        # Diagnose: anything not in the canonical set means we fell through
+        # to the substring fallback AND that fallback also missed.
+        leakage = {v for v in col_data if v not in canonical_set}
+        if leakage:
+            unrecognized[target] = leakage
+
+    if unrecognized:
+        import warnings
+        msgs = []
+        for col, vals in unrecognized.items():
+            sample = sorted(vals, key=str)[:3]
+            msgs.append(
+                f"  {col}: {len(vals)} unrecognized value(s); "
+                f"first {len(sample)}: {sample!r}"
+            )
+        warnings.warn(
+            "build_conversation_table: short-label columns contain "
+            "values that did not match a canonical short label. "
+            "These values were passed through unchanged so they remain "
+            "visible in plots; to clean them up, paste a few representative "
+            "values into the relevant alias map in analysis/schema.py "
+            "(REPRESENTATIVE_ALIASES / BENIGN_CONTEXT_ALIASES / "
+            "Cialdini aliases inside cialdini_principle_label).\n"
+            + "\n".join(msgs),
+            stacklevel=2,
+        )
+
     return out
 
 

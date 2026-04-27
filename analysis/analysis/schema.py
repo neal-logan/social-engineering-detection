@@ -33,9 +33,10 @@ def cialdini_principle_label(value: object) -> str:
 
     The `cialdini_emphasis` column may contain either the principle key
     ("authority", "liking", ...) or the full prompt text the generator
-    used (e.g. a long paragraph emphasizing authority). Both should
-    display as the bare principle name. We do a substring match against
-    the canonical principle list and return the first hit.
+    used. Both should display as the bare principle name. We do a
+    substring match against the canonical principle list, with explicit
+    aliases for principles whose prompt phrasing differs from the
+    underscore-form key.
 
     For values that contain no recognizable principle, returns the
     original value as a string (so unexpected slices remain visible
@@ -44,13 +45,202 @@ def cialdini_principle_label(value: object) -> str:
     if value is None:
         return "unknown"
     text = str(value).lower()
-    # Prefer longer principle names first so e.g. 'commitment_consistency'
-    # wins over a shorter principle that happens to be a substring.
-    for principle in sorted(CIALDINI_PRINCIPLES, key=len, reverse=True):
-        # Match on either underscore form or space form
-        if principle in text or principle.replace("_", " ") in text:
+
+    # Aliases: each principle maps to the key plus any phrasings the
+    # prompt text might use. Order does not matter; the loop below
+    # picks the first principle for which any alias matches.
+    aliases: dict[str, tuple[str, ...]] = {
+        "commitment_consistency": (
+            "commitment_consistency",
+            "commitment consistency",
+            "commitment and consistency",
+            "commitment/consistency",
+            "commitment-consistency",
+        ),
+        "social_proof": (
+            "social_proof",
+            "social proof",
+        ),
+        "reciprocity": ("reciprocity",),
+        "authority": ("authority",),
+        "liking": ("liking",),
+        "scarcity": ("scarcity",),
+        "unity": ("unity",),
+    }
+
+    # Match longest aliases first so e.g. "commitment and consistency"
+    # is preferred over a shorter principle that happens to be a
+    # substring.
+    flat = sorted(
+        ((principle, alias) for principle, al in aliases.items() for alias in al),
+        key=lambda pa: -len(pa[1]),
+    )
+    for principle, alias in flat:
+        if alias in text:
             return principle
     return str(value).strip()
+
+
+# ---------------------------------------------------------------------------
+# Short-label helpers for other prompt-text dimensions
+# ---------------------------------------------------------------------------
+
+# These columns may carry either the dimension *key* (e.g. "by_book") or
+# the rendered prompt *value* (e.g. a paragraph describing a by-the-book
+# representative). The analysis pipeline prefers the key when available
+# (via the `*_key` companion column) and falls back to substring matches
+# against known short labels.
+
+REPRESENTATIVE_SHORT_LABELS: tuple[str, ...] = (
+    "by_book",
+    "tired",
+    "helpful",
+    "distracted",
+)
+
+BENIGN_CONTEXT_SHORT_LABELS: tuple[str, ...] = (
+    "minimal",
+    "moderate",
+    "heavy",
+)
+
+
+# Aliases: each canonical short label maps to a tuple of phrasings the
+# prompt text might use. Order does not matter; the matcher picks the
+# canonical label whose longest matched alias appears in the value.
+# Add new phrasings here whenever a real-data value falls through.
+
+REPRESENTATIVE_ALIASES: dict[str, tuple[str, ...]] = {
+    "by_book": (
+        "by_book",
+        "by the book",
+        "by-the-book",
+        "by-book",
+        "follows policy",
+        "follows procedure",
+        "strict",
+        "rule-following",
+        "rule following",
+        "policy-bound",
+        "procedural",
+    ),
+    "tired": (
+        "tired",
+        "fatigued",
+        "exhausted",
+        "end of shift",
+        "sleepy",
+        "weary",
+        "burnt out",
+        "burned out",
+    ),
+    "helpful": (
+        "helpful",
+        "eager to help",
+        "friendly",
+        "accommodating",
+        "obliging",
+    ),
+    "distracted": (
+        "distracted",
+        "multitasking",
+        "rushed",
+        "busy",
+        "overwhelmed",
+        "scattered",
+    ),
+}
+
+BENIGN_CONTEXT_ALIASES: dict[str, tuple[str, ...]] = {
+    "minimal": (
+        "minimal",
+        "little benign",
+        "brief",
+        "few benign",
+        "sparse",
+        "low context",
+        "no benign",
+        # Phrasings observed in real generator prompts:
+        "mostly stays on topic",
+        "just a little extraneous",
+        "businesslike",
+    ),
+    "moderate": (
+        "moderate",
+        "some benign",
+        "balanced",
+        "medium",
+        "intermediate",
+        # Phrasings observed in real generator prompts:
+        "very substantial amount of benign",
+        "two or three extraneous sentences",
+        "obscure the attack shape",
+    ),
+    "heavy": (
+        "heavy",
+        "extensive benign",
+        "lots of benign",
+        "extensive",
+        "verbose",
+        "high context",
+        "abundant benign",
+        # Phrasings observed in real generator prompts:
+        "absolutely unhinged",
+        "rambling",
+        "several extraneous sentences",
+        "unreasonable manner",
+    ),
+}
+
+
+def _alias_match(
+    value: object,
+    aliases: dict[str, tuple[str, ...]],
+) -> str | None:
+    """Return the canonical key whose longest matched alias is in `value`.
+
+    Each canonical key (e.g. "by_book") maps to phrasings that may appear
+    in the rendered prompt text (e.g. "by-the-book", "follows policy").
+    We search across ALL aliases, sorted longest-first, and return the
+    canonical key associated with the first hit. This guarantees that
+    "by-the-book" wins over a shorter accidental substring like "book".
+    """
+    if value is None:
+        return None
+    text = str(value).lower()
+    flat = sorted(
+        ((canonical, alias)
+         for canonical, al in aliases.items()
+         for alias in al),
+        key=lambda pa: -len(pa[1]),
+    )
+    for canonical, alias in flat:
+        if alias in text:
+            return canonical
+    return None
+
+
+def representative_short_label(value: object) -> str:
+    """Return a short representative label.
+
+    Tries the alias map; returns the canonical key on hit, otherwise
+    returns the value unchanged so unrecognized phrasings remain
+    visible (and patchable in REPRESENTATIVE_ALIASES) rather than
+    silently collapsing.
+    """
+    if value is None:
+        return "unknown"
+    matched = _alias_match(value, REPRESENTATIVE_ALIASES)
+    return matched if matched is not None else str(value).strip()
+
+
+def benign_context_short_label(value: object) -> str:
+    """Return a short benign-context label (minimal / moderate / heavy)."""
+    if value is None:
+        return "unknown"
+    matched = _alias_match(value, BENIGN_CONTEXT_ALIASES)
+    return matched if matched is not None else str(value).strip()
+
 
 # ---------------------------------------------------------------------------
 # Policy violation types (representative-turn flags)
