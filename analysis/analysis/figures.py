@@ -28,66 +28,143 @@ from . import schema as S
 
 
 # ---------------------------------------------------------------------------
-# UNC Charlotte color palette
+# Color themes
 # ---------------------------------------------------------------------------
-# Official primary brand colors (https://brand.charlotte.edu/visual-identity/color-palette/):
-#   Charlotte Green  PMS 7484   #005035
-#   Niner Gold       PMS 7503   #A49665
-# Athletic-mark variants (slightly brighter):
-#   Athletic Green   PMS 349    #046A38
-#   Athletic Gold    PMS 465    #B9975B
-# We expose a curated palette anchored on the official primaries with
-# supporting tones for series differentiation.
+# Two themes are available; switch at runtime with `apply_theme(name)`.
+# The default ("green_gold") follows the UNC Charlotte primary brand
+# palette. The alternate ("blue_brown") is provided for slide decks
+# whose surrounding theme is blue.
+#
+# Each theme defines:
+#   - 4 anchor colors: PRIMARY, SECONDARY, HIGHLIGHT, NEUTRAL
+#   - an 8-color series palette for ROC curves and other multi-series plots
+#   - a sequential heatmap colormap
+#   - a diverging heatmap colormap (centered at 0.5 for AUC plots)
+#
+# Both colormaps are tuned to stay light enough that black cell-text
+# remains legible across the full gradient.
 
-UNCC_GREEN_DARK   = "#005035"   # Charlotte Green (primary)
-UNCC_GREEN_BRIGHT = "#046A38"   # Athletic green (lighter, more saturated)
-UNCC_GOLD         = "#A49665"   # Niner Gold (primary)
-UNCC_GOLD_BRIGHT  = "#B9975B"   # Athletic gold (lighter, more saturated)
-UNCC_BLACK        = "#27251F"   # Athletic black
-UNCC_GREY_DARK    = "#5A5A5A"
-UNCC_GREY         = "#8C8C8C"
-UNCC_GREY_LIGHT   = "#CCCCCC"
-
-# Default series palette: green-and-gold leading, neutrals filling out.
-# Used by ROC curves and any other multi-series plots.
-UNCC_PALETTE: tuple[str, ...] = (
-    UNCC_GREEN_DARK,
-    UNCC_GOLD,
-    UNCC_GREEN_BRIGHT,
-    UNCC_GOLD_BRIGHT,
-    UNCC_BLACK,
-    UNCC_GREY_DARK,
-    UNCC_GREY,
-    UNCC_GREY_LIGHT,
-)
-
-# Single-color anchors for specific roles
-COLOR_PRIMARY = UNCC_GREEN_DARK    # primary signal (e.g., "predicted positive")
-COLOR_SECONDARY = UNCC_GOLD        # secondary signal (e.g., "actual violation")
-COLOR_NEUTRAL = UNCC_GREY          # neutral / "before"
-COLOR_HIGHLIGHT = UNCC_GREEN_BRIGHT # highlighted / "after"
-COLOR_DIVIDER = UNCC_BLACK         # axis lines, dividers
-
-# Heatmap colormaps. Both are tuned so that even the most saturated end
-# of the gradient stays light enough that black cell-text reads cleanly.
-# This is more important for legibility than maximum dynamic range; if
-# you need a high-contrast variant for a specific plot, pass `cmap=` to
-# heatmap_from_dataframe explicitly.
 import matplotlib.colors as _mcolors
 
-# Sequential: pale cream → Niner Gold (warm, monotone, never goes dark)
-UNCC_GREEN_CMAP = _mcolors.LinearSegmentedColormap.from_list(
-    "uncc_sequential",
-    ["#FFFDF5", "#F4ECD2", "#E5D7A1", "#C9B777", UNCC_GOLD],
-)
+# Shared neutrals, used by both themes
+UNCC_BLACK      = "#27251F"
+UNCC_GREY_DARK  = "#5A5A5A"
+UNCC_GREY       = "#8C8C8C"
+UNCC_GREY_LIGHT = "#CCCCCC"
 
-# Diverging: muted gold ← cream → muted Charlotte Green. Both poles are
-# tinted but light; the midpoint is near-white so the direction of
-# departure from 0.5 is obvious without forcing dark text on dark cells.
-UNCC_DIVERGING_CMAP = _mcolors.LinearSegmentedColormap.from_list(
-    "uncc_diverging",
-    [UNCC_GOLD_BRIGHT, "#F0E5C4", "#FFFDF5", "#C9DDD0", "#5C9479"],
-)
+# --- Green-and-gold (UNC Charlotte primary brand) ---------------------------
+UNCC_GREEN_DARK   = "#005035"   # Charlotte Green
+UNCC_GREEN_BRIGHT = "#046A38"   # Athletic green
+UNCC_GOLD         = "#A49665"   # Niner Gold
+UNCC_GOLD_BRIGHT  = "#B9975B"   # Athletic gold
+
+_THEME_GREEN_GOLD = {
+    "name":        "green_gold",
+    "PRIMARY":     UNCC_GREEN_DARK,
+    "SECONDARY":   UNCC_GOLD,
+    "HIGHLIGHT":   UNCC_GREEN_BRIGHT,
+    "NEUTRAL":     UNCC_GREY,
+    "PALETTE": (
+        UNCC_GREEN_DARK,
+        UNCC_GOLD,
+        UNCC_GREEN_BRIGHT,
+        UNCC_GOLD_BRIGHT,
+        UNCC_BLACK,
+        UNCC_GREY_DARK,
+        UNCC_GREY,
+        UNCC_GREY_LIGHT,
+    ),
+    # Sequential: cream → Niner Gold
+    "SEQUENTIAL_STOPS": ["#FFFDF5", "#F4ECD2", "#E5D7A1", "#C9B777", UNCC_GOLD],
+    # Diverging: muted gold ← cream → muted green
+    "DIVERGING_STOPS": [UNCC_GOLD_BRIGHT, "#F0E5C4", "#FFFDF5",
+                        "#C9DDD0", "#5C9479"],
+}
+
+# --- Blue-and-brown ---------------------------------------------------------
+# Tones chosen to harmonize with a blue presentation while still
+# providing strong differentiation between PRIMARY (deep blue) and
+# SECONDARY (warm brown).
+BLUE_DARK    = "#1F3A5F"   # deep navy
+BLUE_BRIGHT  = "#2E5C8A"   # mid blue
+BROWN        = "#8C6E4A"   # warm brown
+BROWN_BRIGHT = "#A88660"   # lighter warm brown
+
+_THEME_BLUE_BROWN = {
+    "name":        "blue_brown",
+    "PRIMARY":     BLUE_DARK,
+    "SECONDARY":   BROWN,
+    "HIGHLIGHT":   BLUE_BRIGHT,
+    "NEUTRAL":     UNCC_GREY,
+    "PALETTE": (
+        BLUE_DARK,
+        BROWN,
+        BLUE_BRIGHT,
+        BROWN_BRIGHT,
+        UNCC_BLACK,
+        UNCC_GREY_DARK,
+        UNCC_GREY,
+        UNCC_GREY_LIGHT,
+    ),
+    # Sequential: pale cream → warm brown (kept warm; cool sequential
+    # ramps clash with PRIMARY when both render in the same figure).
+    "SEQUENTIAL_STOPS": ["#FBF7F0", "#EDE0CC", "#D6C09A", "#B6986C", BROWN],
+    # Diverging: muted brown ← cream → muted blue. Both poles tinted
+    # enough to read direction-of-departure clearly while staying light
+    # enough that black text remains legible.
+    "DIVERGING_STOPS": [BROWN_BRIGHT, "#EDDAB8", "#FFFDF5",
+                        "#CFDBE7", "#5C7A9B"],
+}
+
+_THEMES = {
+    "green_gold": _THEME_GREEN_GOLD,
+    "blue_brown": _THEME_BLUE_BROWN,
+}
+
+# Active-theme module-level constants. These are what other functions
+# in this module reference. `apply_theme(name)` rebinds them in place.
+COLOR_PRIMARY: str
+COLOR_SECONDARY: str
+COLOR_HIGHLIGHT: str
+COLOR_NEUTRAL: str
+COLOR_DIVIDER = UNCC_BLACK   # axis lines / dividers — same in both themes
+UNCC_PALETTE: tuple[str, ...]
+UNCC_GREEN_CMAP: _mcolors.Colormap     # name kept for backwards compat
+UNCC_DIVERGING_CMAP: _mcolors.Colormap
+
+
+def apply_theme(name: str) -> None:
+    """Switch the active color theme.
+
+    Mutates module-level color constants and colormaps used by every
+    figure-producing function in this module. Call once near the top of
+    a notebook (after `import figures`).
+
+    Available themes: "green_gold" (default), "blue_brown".
+    """
+    global COLOR_PRIMARY, COLOR_SECONDARY, COLOR_HIGHLIGHT, COLOR_NEUTRAL
+    global UNCC_PALETTE, UNCC_GREEN_CMAP, UNCC_DIVERGING_CMAP
+    if name not in _THEMES:
+        raise ValueError(
+            f"unknown theme {name!r}; choose from {sorted(_THEMES)}"
+        )
+    t = _THEMES[name]
+    COLOR_PRIMARY   = t["PRIMARY"]
+    COLOR_SECONDARY = t["SECONDARY"]
+    COLOR_HIGHLIGHT = t["HIGHLIGHT"]
+    COLOR_NEUTRAL   = t["NEUTRAL"]
+    UNCC_PALETTE    = t["PALETTE"]
+    UNCC_GREEN_CMAP = _mcolors.LinearSegmentedColormap.from_list(
+        f"theme_sequential_{name}", t["SEQUENTIAL_STOPS"],
+    )
+    UNCC_DIVERGING_CMAP = _mcolors.LinearSegmentedColormap.from_list(
+        f"theme_diverging_{name}", t["DIVERGING_STOPS"],
+    )
+
+
+# Apply the default theme at import time so module-level constants are
+# bound before any figure function runs.
+apply_theme("green_gold")
 
 
 # ---------------------------------------------------------------------------
